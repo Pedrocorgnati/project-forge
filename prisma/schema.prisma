@@ -1,0 +1,608 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [pgvector(map: "vector")]
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+
+enum ProjectStatus {
+  BRIEFING
+  ESTIMATION
+  APPROVED
+  IN_PROGRESS
+  COMPLETED
+  ARCHIVED
+}
+
+enum UserRole {
+  SOCIO
+  PM
+  DEV
+  CLIENTE
+}
+
+enum DocumentType {
+  PRD
+  CHANGE_ORDER
+  ESTIMATE
+  DELIVERY
+}
+
+enum DocumentStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  OBSOLETE
+}
+
+enum EstimateStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  BLOCKED
+}
+
+enum ScopeResult {
+  VALID
+  INVALID
+  PARTIAL
+  NEEDS_REVIEW
+}
+
+enum ChangeOrderStatus {
+  DRAFT
+  SENT
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum AlertTier {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+}
+
+enum NotificationPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ApprovalAction {
+  APPROVED
+  REJECTED
+  CLARIFICATION_REQUESTED
+}
+
+enum IndexationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETE
+  FAILED
+}
+
+// ─────────────────────────────────────────────
+// ORGANIZATION
+// ─────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @db.VarChar(255)
+  slug      String   @unique @db.VarChar(100)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  users        User[]
+  projects     Project[]
+  costRates    CostRate[]
+
+  @@map("organizations")
+}
+
+// ─────────────────────────────────────────────
+// USER (maps to Supabase auth.users)
+// ─────────────────────────────────────────────
+
+model User {
+  id                 String    @id @db.Uuid // matches auth.users.id
+  organizationId     String    @map("organization_id") @db.Uuid
+  email              String    @unique @db.VarChar(255)
+  name               String    @db.VarChar(255)
+  role               UserRole  @default(DEV)
+  avatarUrl          String?   @map("avatar_url")
+  mfaEnabled         Boolean   @default(false) @map("mfa_enabled")
+  consentGivenAt     DateTime? @map("consent_given_at") @db.Timestamptz
+  dataRetentionUntil DateTime? @map("data_retention_until") @db.Timestamptz
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  organization        Organization          @relation(fields: [organizationId], references: [id])
+  projectMembers      ProjectMember[]
+  documents           Document[]            @relation("DocumentCreator")
+  documentVersions    DocumentVersion[]     @relation("DocumentVersionCreator")
+  estimates           Estimate[]
+  assignedTasks       Task[]
+  timesheets          TimesheetEntry[]
+  approvalLogs        ApprovalLog[]
+  notifications       Notification[]
+  notificationPrefs   NotificationPreference[]
+  auditLogs           AuditLog[]
+  changeOrders        ChangeOrder[]
+
+  @@index([organizationId], name: "IDX_users_organization")
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// PROJECT
+// ─────────────────────────────────────────────
+
+model Project {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String        @map("organization_id") @db.Uuid
+  name           String        @db.VarChar(255)
+  slug           String        @db.VarChar(100)
+  status         ProjectStatus @default(BRIEFING)
+  revenue        Decimal?      @db.Decimal(12, 2)
+  currency       String        @default("BRL") @db.VarChar(3)
+  description    String?
+  startedAt      DateTime?     @map("started_at") @db.Timestamptz
+  completedAt    DateTime?     @map("completed_at") @db.Timestamptz
+  createdAt      DateTime      @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime      @updatedAt @map("updated_at") @db.Timestamptz
+
+  organization      Organization        @relation(fields: [organizationId], references: [id])
+  members           ProjectMember[]
+  brief             Brief?
+  documents         Document[]
+  estimates         Estimate[]
+  tasks             Task[]
+  changeOrders      ChangeOrder[]
+  timesheets        TimesheetEntry[]
+  ragIndex          RAGIndex?
+  events            Event[]
+  notifications     Notification[]
+  projectCostRates  ProjectCostRate[]
+
+  @@unique([organizationId, slug], name: "IDX_projects_slug")
+  @@index([organizationId, status], name: "IDX_projects_org_status")
+  @@map("projects")
+}
+
+// ─────────────────────────────────────────────
+// PROJECT MEMBER
+// ─────────────────────────────────────────────
+
+model ProjectMember {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      UserRole
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@map("project_members")
+}
+
+// ─────────────────────────────────────────────
+// BRIEF (1:1 per project)
+// ─────────────────────────────────────────────
+
+model Brief {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId  String   @unique @map("project_id") @db.Uuid
+  answers    Json     @default("{}") @db.JsonB
+  aiContext  Json     @default("{}") @map("ai_context") @db.JsonB
+  isComplete Boolean  @default(false) @map("is_complete")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@map("briefs")
+}
+
+// ─────────────────────────────────────────────
+// DOCUMENT (versionable)
+// ─────────────────────────────────────────────
+
+model Document {
+  id             String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String         @map("project_id") @db.Uuid
+  createdBy      String         @map("created_by") @db.Uuid
+  type           DocumentType
+  title          String         @db.VarChar(255)
+  status         DocumentStatus @default(DRAFT)
+  currentVersion Int            @default(1) @map("current_version")
+  slaDeadline    DateTime?      @map("sla_deadline") @db.Timestamptz
+  createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz
+
+  project      Project           @relation(fields: [projectId], references: [id])
+  creator      User              @relation("DocumentCreator", fields: [createdBy], references: [id])
+  versions     DocumentVersion[]
+  approvalLogs ApprovalLog[]
+  changeOrders ChangeOrder[]
+
+  @@index([projectId, type], name: "IDX_documents_project_type")
+  @@index([status], name: "IDX_documents_status")
+  @@map("documents")
+}
+
+// ─────────────────────────────────────────────
+// DOCUMENT VERSION (immutable)
+// ─────────────────────────────────────────────
+
+model DocumentVersion {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId    String   @map("document_id") @db.Uuid
+  createdBy     String   @map("created_by") @db.Uuid
+  versionNumber Int      @map("version_number")
+  content       String
+  contentHash   String   @map("content_hash") @db.VarChar(64)
+  metadata      Json     @default("{}") @db.JsonB
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  creator  User     @relation("DocumentVersionCreator", fields: [createdBy], references: [id])
+
+  @@unique([documentId, versionNumber])
+  @@index([contentHash], name: "IDX_docver_hash")
+  @@map("document_versions")
+}
+
+// ─────────────────────────────────────────────
+// ESTIMATE
+// ─────────────────────────────────────────────
+
+model Estimate {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId       String         @map("project_id") @db.Uuid
+  createdBy       String         @map("created_by") @db.Uuid
+  version         Int            @default(1)
+  projectCategory String         @map("project_category") @db.VarChar(50)
+  projectSize     String         @map("project_size") @db.VarChar(10)
+  stackTags       Json           @default("[]") @map("stack_tags") @db.JsonB
+  minHours        Decimal        @map("min_hours") @db.Decimal(8, 2)
+  maxHours        Decimal        @map("max_hours") @db.Decimal(8, 2)
+  bufferPercent   Decimal        @default(15.00) @map("buffer_percent") @db.Decimal(5, 2)
+  confidence      Decimal        @db.Decimal(5, 2)
+  source          String         @db.VarChar(20)
+  breakdown       Json           @default("{}") @db.JsonB
+  status          EstimateStatus @default(DRAFT)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id])
+  creator User    @relation(fields: [createdBy], references: [id])
+
+  @@index([projectId], name: "IDX_estimates_project")
+  @@map("estimates")
+}
+
+// ─────────────────────────────────────────────
+// TASK (Kanban)
+// ─────────────────────────────────────────────
+
+model Task {
+  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId      String     @map("project_id") @db.Uuid
+  assigneeId     String?    @map("assignee_id") @db.Uuid
+  title          String     @db.VarChar(500)
+  description    String?
+  status         TaskStatus @default(TODO)
+  estimatedHours Decimal?   @map("estimated_hours") @db.Decimal(6, 2)
+  position       Int        @default(0)
+  scopeStatus    String?    @map("scope_status") @db.VarChar(20)
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt      DateTime   @updatedAt @map("updated_at") @db.Timestamptz
+
+  project         Project          @relation(fields: [projectId], references: [id])
+  assignee        User?            @relation(fields: [assigneeId], references: [id])
+  scopeValidation ScopeValidation?
+  timesheets      TimesheetEntry[]
+  changeOrderTasks ChangeOrderTask[]
+
+  @@index([projectId, status], name: "IDX_tasks_project_status")
+  @@index([assigneeId], name: "IDX_tasks_assignee")
+  @@index([projectId, status, position], name: "IDX_tasks_position")
+  @@map("tasks")
+}
+
+// ─────────────────────────────────────────────
+// SCOPE VALIDATION (1:1 per task)
+// ─────────────────────────────────────────────
+
+model ScopeValidation {
+  id                  String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId              String      @unique @map("task_id") @db.Uuid
+  result              ScopeResult
+  similarityScore     Decimal     @map("similarity_score") @db.Decimal(5, 4)
+  reasoning           String
+  matchedRequirements Json        @default("[]") @map("matched_requirements") @db.JsonB
+  validatedAt         DateTime    @default(now()) @map("validated_at") @db.Timestamptz
+
+  task Task @relation(fields: [taskId], references: [id])
+
+  @@map("scope_validations")
+}
+
+// ─────────────────────────────────────────────
+// CHANGE ORDER
+// ─────────────────────────────────────────────
+
+model ChangeOrder {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId    String            @map("project_id") @db.Uuid
+  createdBy    String            @map("created_by") @db.Uuid
+  title        String            @db.VarChar(255)
+  description  String
+  status       ChangeOrderStatus @default(DRAFT)
+  impactTier   AlertTier         @map("impact_tier")
+  hoursImpact  Decimal           @map("hours_impact") @db.Decimal(8, 2)
+  costImpact   Decimal           @map("cost_impact") @db.Decimal(12, 2)
+  scopeImpact  String            @map("scope_impact")
+  documentId   String?           @map("document_id") @db.Uuid
+  sentAt       DateTime?         @map("sent_at") @db.Timestamptz
+  resolvedAt   DateTime?         @map("resolved_at") @db.Timestamptz
+  slaDeadline  DateTime?         @map("sla_deadline") @db.Timestamptz
+  createdAt    DateTime          @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime          @updatedAt @map("updated_at") @db.Timestamptz
+
+  project  Project           @relation(fields: [projectId], references: [id])
+  creator  User              @relation(fields: [createdBy], references: [id])
+  document Document?         @relation(fields: [documentId], references: [id])
+  tasks    ChangeOrderTask[]
+
+  @@index([projectId, status], name: "IDX_change_orders_project_status")
+  @@index([slaDeadline], name: "IDX_change_orders_sla")
+  @@map("change_orders")
+}
+
+// ─────────────────────────────────────────────
+// CHANGE ORDER TASK (N:N)
+// ─────────────────────────────────────────────
+
+model ChangeOrderTask {
+  id            String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  changeOrderId String @map("change_order_id") @db.Uuid
+  taskId        String @map("task_id") @db.Uuid
+
+  changeOrder ChangeOrder @relation(fields: [changeOrderId], references: [id])
+  task        Task        @relation(fields: [taskId], references: [id])
+
+  @@unique([changeOrderId, taskId])
+  @@map("change_order_tasks")
+}
+
+// ─────────────────────────────────────────────
+// TIMESHEET ENTRY (soft delete)
+// ─────────────────────────────────────────────
+
+model TimesheetEntry {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId String    @map("project_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  taskId    String?   @map("task_id") @db.Uuid
+  hours     Decimal   @db.Decimal(4, 2)
+  role      UserRole
+  workDate  DateTime  @map("work_date") @db.Date
+  notes     String?
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id])
+  user    User    @relation(fields: [userId], references: [id])
+  task    Task?   @relation(fields: [taskId], references: [id])
+
+  @@index([projectId, workDate], name: "IDX_timesheet_project_date")
+  @@index([userId, workDate], name: "IDX_timesheet_user_date")
+  @@map("timesheet_entries")
+}
+
+// ─────────────────────────────────────────────
+// RAG INDEX (1:1 per project)
+// ─────────────────────────────────────────────
+
+model RAGIndex {
+  id                String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId         String           @unique @map("project_id") @db.Uuid
+  githubRepoUrl     String?          @map("github_repo_url")
+  githubOwner       String?          @map("github_owner") @db.VarChar(100)
+  githubRepo        String?          @map("github_repo") @db.VarChar(100)
+  lastCommitSha     String?          @map("last_commit_sha") @db.VarChar(40)
+  totalChunks       Int              @default(0) @map("total_chunks")
+  indexedExtensions Json             @default("[]") @map("indexed_extensions") @db.JsonB
+  indexationStatus  IndexationStatus @default(PENDING) @map("indexation_status")
+  lastIndexedAt     DateTime?        @map("last_indexed_at") @db.Timestamptz
+  createdAt         DateTime         @default(now()) @map("created_at") @db.Timestamptz
+
+  project    Project     @relation(fields: [projectId], references: [id])
+  embeddings Embedding[]
+
+  @@map("rag_indexes")
+}
+
+// ─────────────────────────────────────────────
+// EMBEDDING (pgvector)
+// ─────────────────────────────────────────────
+
+model Embedding {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ragIndexId  String   @map("rag_index_id") @db.Uuid
+  chunkText   String   @map("chunk_text")
+  embedding   Unsupported("vector(384)")?
+  filePath    String   @map("file_path")
+  commitSha   String   @map("commit_sha") @db.VarChar(40)
+  metadata    Json     @default("{}") @db.JsonB
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  ragIndex RAGIndex @relation(fields: [ragIndexId], references: [id])
+
+  @@index([ragIndexId], name: "IDX_embeddings_rag")
+  @@map("embeddings")
+}
+
+// ─────────────────────────────────────────────
+// EVENT (internal event bus)
+// ─────────────────────────────────────────────
+
+model Event {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId     String    @map("project_id") @db.Uuid
+  type          String    @db.VarChar(100)
+  payload       Json      @default("{}") @db.JsonB
+  sourceModule  String    @map("source_module") @db.VarChar(50)
+  correlationId String?   @map("correlation_id") @db.VarChar(100)
+  processedAt   DateTime? @map("processed_at") @db.Timestamptz
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@index([projectId, type, createdAt(sort: Desc)], name: "IDX_events_project_type")
+  @@map("events")
+}
+
+// ─────────────────────────────────────────────
+// APPROVAL LOG (immutable audit trail)
+// ─────────────────────────────────────────────
+
+model ApprovalLog {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  documentId    String         @map("document_id") @db.Uuid
+  versionNumber Int            @map("version_number")
+  userId        String         @map("user_id") @db.Uuid
+  action        ApprovalAction
+  comment       String?
+  ipAddress     String         @map("ip_address") @db.VarChar(45)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz
+
+  document Document @relation(fields: [documentId], references: [id])
+  user     User     @relation(fields: [userId], references: [id])
+
+  @@map("approval_logs")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATION
+// ─────────────────────────────────────────────
+
+model Notification {
+  id        String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String              @map("user_id") @db.Uuid
+  projectId String?             @map("project_id") @db.Uuid
+  type      String              @db.VarChar(100)
+  channel   NotificationChannel
+  priority  NotificationPriority
+  payload   Json                @default("{}") @db.JsonB
+  isRead    Boolean             @default(false) @map("is_read")
+  groupedId String?             @map("grouped_id") @db.VarChar(100)
+  readAt    DateTime?           @map("read_at") @db.Timestamptz
+  createdAt DateTime            @default(now()) @map("created_at") @db.Timestamptz
+
+  user    User     @relation(fields: [userId], references: [id])
+  project Project? @relation(fields: [projectId], references: [id])
+
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────
+// NOTIFICATION PREFERENCE
+// ─────────────────────────────────────────────
+
+model NotificationPreference {
+  id        String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String              @map("user_id") @db.Uuid
+  eventType String              @map("event_type") @db.VarChar(100)
+  channel   NotificationChannel
+  enabled   Boolean             @default(true)
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([userId, eventType, channel])
+  @@map("notification_preferences")
+}
+
+// ─────────────────────────────────────────────
+// COST RATE (org-level defaults)
+// ─────────────────────────────────────────────
+
+model CostRate {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  role           UserRole
+  hourlyRate     Decimal  @map("hourly_rate") @db.Decimal(10, 2)
+  currency       String   @default("BRL") @db.VarChar(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, role])
+  @@map("cost_rates")
+}
+
+// ─────────────────────────────────────────────
+// PROJECT COST RATE (per-project override)
+// ─────────────────────────────────────────────
+
+model ProjectCostRate {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  role       UserRole
+  hourlyRate Decimal  @map("hourly_rate") @db.Decimal(10, 2)
+  currency   String   @default("BRL") @db.VarChar(3)
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  project Project @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, role])
+  @@map("project_cost_rates")
+}
+
+// ─────────────────────────────────────────────
+// AUDIT LOG (general)
+// ─────────────────────────────────────────────
+
+model AuditLog {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId       String   @map("user_id") @db.Uuid
+  action       String   @db.VarChar(100)
+  resourceType String   @map("resource_type") @db.VarChar(50)
+  resourceId   String   @map("resource_id") @db.Uuid
+  beforeState  Json?    @map("before_state") @db.JsonB
+  afterState   Json?    @map("after_state") @db.JsonB
+  ipAddress    String   @map("ip_address") @db.VarChar(45)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
