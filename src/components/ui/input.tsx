@@ -59,7 +59,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
 )
 Input.displayName = 'Input'
 
-interface PasswordInputProps extends Omit<InputProps, 'type' | 'rightIcon'> {}
+type PasswordInputProps = Omit<InputProps, 'type' | 'rightIcon'>
 
 export const PasswordInput = forwardRef<HTMLInputElement, PasswordInputProps>(
   ({ className, ...props }, ref) => {

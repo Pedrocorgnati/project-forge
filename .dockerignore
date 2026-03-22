@@ -1,0 +1,33 @@
+# Dependências
+node_modules
+npm-debug.log*
+
+# Build outputs
+.next
+out
+
+# Env files (nunca no container)
+.env
+.env.local
+.env.*.local
+
+# Dev tools
+.git
+.gitignore
+*.md
+.eslintrc*
+.prettierrc*
+jest.config*
+
+# Prisma (apenas migrations necessárias)
+prisma/dev.db
+prisma/dev.db-journal
+
+# Sistema
+.DS_Store
+*.log
+coverage
+.nyc_output
+
+# CI
+.github

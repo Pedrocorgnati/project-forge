@@ -1,0 +1,45 @@
+name: project-forge
+
+services:
+  app:
+    build:
+      context: .
+      target: builder  # Usa estágio builder para dev (com devDeps)
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local
+    environment:
+      - NODE_ENV=development
+    volumes:
+      # Hot-reload: monta código fonte no container
+      - .:/app
+      # Preserva node_modules do container (não sobrescrever com host)
+      - /app/node_modules
+      # Preserva .next do container
+      - /app/.next
+    command: npm run dev
+    # Health check para confirmar que app iniciou
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Serviço auxiliar: apenas para rodar prisma commands
+  prisma:
+    build:
+      context: .
+      target: deps
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - .env.local
+    profiles:
+      - tools  # Somente com: docker-compose --profile tools run prisma
+    command: npx prisma studio
+    ports:
+      - "5555:5555"

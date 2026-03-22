@@ -19,21 +19,23 @@ interface DegradedBannerProps {
 }
 
 export function DegradedBanner({ module, isAvailable = false, onDismiss, className }: DegradedBannerProps) {
-  const [dismissed, setDismissed] = useState(false)
+  // Lazy init: lê localStorage apenas na montagem, evitando setState em efeito
+  const [dismissed, setDismissed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem(`degraded-${module}`) === 'true'
+  })
 
-  useEffect(() => {
-    const stored = localStorage.getItem(`degraded-${module}`)
-    if (stored === 'true') setDismissed(true)
-  }, [module])
-
+  // Limpa localStorage quando serviço se recupera (sem setState — sem cascata de renders)
   useEffect(() => {
     if (isAvailable) {
       localStorage.removeItem(`degraded-${module}`)
-      setDismissed(false)
     }
   }, [isAvailable, module])
 
-  if (isAvailable || dismissed) return null
+  // Quando o serviço está disponível, trata como não dispensado (derivado, sem estado extra)
+  const effectiveDismissed = !isAvailable && dismissed
+
+  if (isAvailable || effectiveDismissed) return null
 
   const handleDismiss = () => {
     setDismissed(true)
