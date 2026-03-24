@@ -22,7 +22,7 @@ export function StreamingText({ content, isStreaming, as: Tag = 'p', className }
       {isStreaming && (
         <span
           aria-hidden="true"
-          className="ml-0.5 inline-block animate-pulse text-indigo-400 dark:text-indigo-300 select-none"
+          className="ml-0.5 inline-block animate-pulse text-brand/70 dark:text-brand select-none"
         >
           |
         </span>

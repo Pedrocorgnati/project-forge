@@ -1,0 +1,132 @@
+// src/app/api/portal/approvals/[approvalId]/respond/route.ts
+// module-17-clientportal-approvals / TASK-1 ST004
+// POST /api/portal/approvals/[approvalId]/respond — CLIENTE aprova ou rejeita
+// Rastreabilidade: INT-105
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { getServerUser } from '@/lib/auth/get-user'
+import { prisma } from '@/lib/db'
+import { EventBus } from '@/lib/events/bus'
+import { EventType } from '@/lib/constants/events'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { logApprovalHistory } from '@/lib/approvals/log-history'
+import { UserRole } from '@prisma/client'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/portal/respond')
+
+const RespondSchema = z
+  .object({
+    action: z.enum(['APPROVED', 'REJECTED']),
+    comment: z.string().max(2000).optional(),
+  })
+  .refine(
+    (d) => d.action !== 'REJECTED' || (d.comment && d.comment.trim().length > 0),
+    { message: 'Comentário obrigatório ao rejeitar', path: ['comment'] },
+  )
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ approvalId: string }> },
+): Promise<NextResponse> {
+  const { approvalId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 401 })
+  }
+  if (user.role !== UserRole.CLIENTE) {
+    return NextResponse.json(
+      { code: 'AUTH_001', message: 'Apenas clientes podem responder aprovações.' },
+      { status: 403 },
+    )
+  }
+
+  const approval = await prisma.approvalRequest.findUnique({
+    where: { id: approvalId },
+    include: {
+      clientAccess: { select: { clientEmail: true } },
+      requester: { select: { email: true, name: true } },
+      project: { select: { id: true, name: true } },
+    },
+  })
+
+  if (!approval) {
+    return NextResponse.json(
+      { code: 'APPROVAL_080', message: 'Aprovação não encontrada.' },
+      { status: 404 },
+    )
+  }
+
+  // Proteção IDOR — apenas o cliente destinatário pode responder
+  if (approval.clientAccess.clientEmail !== user.email) {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 403 })
+  }
+
+  // Verificar se está expirada
+  if (approval.status === 'EXPIRED') {
+    return NextResponse.json(
+      { code: 'APPROVAL_EXPIRED', message: 'Este pedido de aprovação expirou. Solicite um novo pedido ao seu gestor.' },
+      { status: 410 },
+    )
+  }
+
+  // Verificar se já foi respondida
+  if (approval.status !== 'PENDING') {
+    return NextResponse.json(
+      { code: 'APPROVAL_051', message: 'Esta aprovação já foi respondida.' },
+      { status: 409 },
+    )
+  }
+
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Body inválido' }, { status: 400 })
+  }
+
+  const parsed = RespondSchema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json(
+      { code: 'VAL_001', errors: parsed.error.flatten() },
+      { status: 422 },
+    )
+  }
+
+  const { action, comment } = parsed.data
+  const now = new Date()
+
+  const updated = await prisma.approvalRequest.update({
+    where: { id: approvalId },
+    data: {
+      status: action,
+      respondedAt: now,
+    },
+  })
+
+  // Registrar história
+  await logApprovalHistory({
+    approvalId,
+    action,
+    comment,
+    actorId: user.id,
+  })
+
+  // Publicar evento APPROVAL_SUBMITTED (fire-and-forget)
+  EventBus.publish(
+    EventType.APPROVAL_SUBMITTED,
+    approval.project.id,
+    {
+      projectId: approval.project.id,
+      approvalId,
+      decision: action,
+    },
+    'module-17',
+  ).catch((err: unknown) =>
+    log.error({ err }, '[module-17] APPROVAL_SUBMITTED publish failed:'),
+  )
+
+  return NextResponse.json(updated)
+}

@@ -1,12 +1,14 @@
 'use client'
 
+import Image from 'next/image'
 import Link from 'next/link'
 import { ChevronDown, LogOut, Menu, Settings, User, X } from 'lucide-react'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
 import { Avatar } from '@/components/ui/avatar'
-import { NotificationBell } from './notification-bell'
+import { NotificationBell } from '@/components/notifications/notification-bell'
 import { ROUTES } from '@/lib/constants'
+import { useAuth } from '@/lib/hooks/use-auth'
 
 interface HeaderProps {
   userName?: string
@@ -24,6 +26,7 @@ export function Header({
   isMobileMenuOpen = false,
 }: HeaderProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const { signOut } = useAuth()
   const [aiStatus] = useState<'available' | 'unavailable'>('available')
 
   return (
@@ -45,7 +48,8 @@ export function Header({
           aria-expanded={isMobileMenuOpen}
           onClick={onMenuToggle}
           className={cn(
-            'md:hidden p-2 rounded-md transition-colors duration-150',
+            'md:hidden p-3 rounded-md transition-colors duration-150',
+            'min-w-[44px] min-h-[44px] flex items-center justify-center',
             'hover:bg-slate-100 dark:hover:bg-slate-800',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand'
           )}
@@ -62,21 +66,7 @@ export function Header({
           aria-label="ProjectForge — página inicial"
           className="text-xl font-bold text-slate-900 dark:text-slate-50 hover:text-brand transition-colors"
         >
-          {/* @ASSET_PLACEHOLDER
-name: logo-symbol
-type: image
-extension: svg
-format: 1:1
-dimensions: 32x32
-description: Logo símbolo do ProjectForge em formato vetorial. Forma geométrica abstrata representando fluxo de trabalho e integração de módulos.
-context: Header da aplicação, sidebar colapsada
-style: Minimalista, linhas finas, monocromático
-mood: Profissional, moderno, confiável
-colors: primary (#6366f1), background (#ffffff)
-elements: Forma geométrica abstrata com iniciais PF estilizadas
-avoid: Gradientes, sombras complexas, texto descritivo
-*/}
-          ProjectForge
+            <Image src="/images/logo-symbol.svg" alt="ProjectForge" width={32} height={32} priority />
         </Link>
 
         {/* AI Status indicator */}
@@ -111,6 +101,7 @@ avoid: Gradientes, sombras complexas, texto descritivo
             data-testid="header-user-menu-button"
             aria-label="Menu do usuário"
             aria-expanded={userMenuOpen}
+            aria-controls="user-menu-dropdown"
             onClick={() => setUserMenuOpen((v) => !v)}
             className={cn(
               'flex items-center gap-2 px-2 py-1.5 rounded-md transition-colors duration-150',
@@ -134,6 +125,7 @@ avoid: Gradientes, sombras complexas, texto descritivo
                 onClick={() => setUserMenuOpen(false)}
               />
               <div
+                id="user-menu-dropdown"
                 data-testid="header-user-menu-dropdown"
                 className={cn(
                   'absolute right-0 top-10 z-50 w-48 rounded-lg border shadow-lg',
@@ -176,7 +168,7 @@ avoid: Gradientes, sombras complexas, texto descritivo
                     className="w-full flex items-center gap-2 px-3 py-2 text-sm text-error hover:bg-error/10 transition-colors"
                     onClick={() => {
                       setUserMenuOpen(false)
-                      // TODO: Implementar backend - signOut
+                      signOut()
                     }}
                   >
                     <LogOut size={16} aria-hidden="true" />

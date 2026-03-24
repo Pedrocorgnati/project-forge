@@ -1,0 +1,68 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { SessionService } from '@/lib/briefforge/session-service'
+import { BriefNotFoundError } from '@/lib/briefforge/brief-service'
+import { prisma } from '@/lib/db'
+import { AppError } from '@/lib/errors'
+import { AIUnavailableError } from '@/lib/briefforge/question-selector'
+import { UserRole } from '@prisma/client'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/briefs/sessions')
+
+// ─── POST /api/briefs/[id]/sessions — Iniciar sessão IA ──────────────────────
+
+export async function POST(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    // Resolve brief → projectId for RBAC check
+    const { id } = await params
+    const briefRecord = await prisma.brief.findUnique({
+      where: { id },
+      select: { projectId: true },
+    })
+    if (!briefRecord) throw new BriefNotFoundError()
+
+    // Requires PM or higher
+    await withProjectAccess(user.id, briefRecord.projectId, UserRole.PM)
+
+    const { session, firstQuestion } = await SessionService.startSession(id, user.id)
+
+    return NextResponse.json({ data: { session, firstQuestion } }, { status: 201 })
+  } catch (err) {
+    if (err instanceof AIUnavailableError) {
+      return NextResponse.json(
+        { error: { code: 'SYS_503', message: 'Serviço de IA temporariamente indisponível.', degraded: true } },
+        { status: 503 },
+      )
+    }
+    if (err instanceof BriefNotFoundError) {
+      return NextResponse.json(
+        { error: { code: 'BRIEF_080', message: 'Brief não encontrado.' } },
+        { status: 404 },
+      )
+    }
+    if (err instanceof AppError) {
+      return NextResponse.json(
+        { error: { code: err.code, message: err.message } },
+        { status: err.statusCode },
+      )
+    }
+    log.error({ err }, '[POST /api/briefs/[id]/sessions]')
+    return NextResponse.json(
+      { error: { code: 'SYS_500', message: 'Erro interno. Tente novamente.' } },
+      { status: 500 },
+    )
+  }
+}

@@ -1,14 +1,27 @@
+/**
+ * Route Group: (app)
+ *
+ * Responsabilidade: Layout visual completo (Sidebar + Header + SessionTimeout).
+ * NÃO aplica restrição de role — use o route group (dashboard) para rotas que
+ * requerem bloqueio de CLIENTE ou de outros roles específicos.
+ *
+ * Rotas incluídas: board, briefforge, configuracoes, dashboard, estimai,
+ * handoffai, notificacoes, perfil, portal, projects, projetos, rentabilia, scopeshield.
+ */
 'use client'
 
 import { useState } from 'react'
 import { Header } from '@/components/layout/header'
 import { Sidebar } from '@/components/layout/sidebar'
+import { useSessionTimeout } from '@/lib/hooks/use-session-timeout'
+import { SessionTimeoutModal } from '@/components/auth/SessionTimeoutModal'
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const { isExpired } = useSessionTimeout(30 * 60 * 1000)
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950">
+    <div className="min-h-screen">
       <Header
         userName="Usuário"
         onMenuToggle={() => setMobileMenuOpen((v) => !v)}
@@ -23,6 +36,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       >
         <div className="p-6">{children}</div>
       </main>
+      <SessionTimeoutModal open={isExpired} />
     </div>
   )
 }

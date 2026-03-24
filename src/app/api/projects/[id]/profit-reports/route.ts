@@ -1,0 +1,204 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess, requireFinancialAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { PLCalculator } from '@/lib/services/pl-calculator'
+import { BurnRateCalculator } from '@/lib/services/burn-rate-calculator'
+import { EventBus } from '@/lib/events'
+import { EventType } from '@/lib/constants/events'
+import { AppError } from '@/lib/errors'
+import { createProfitReportSchema } from '@/lib/schemas/profit-report.schema'
+import { UserRole } from '@prisma/client'
+
+// ─── POST /api/projects/[id]/profit-reports ───────────────────────────────────
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId, UserRole.PM)
+    requireFinancialAccess(user.role)
+
+    const body = await req.json()
+
+    // Idempotency check
+    const idempotencyKey = req.headers.get('x-idempotency-key')
+    if (idempotencyKey) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const existing = await prisma.profitReport.findFirst({
+        where: { projectId, idempotencyKey } as any,
+      })
+      if (existing) {
+        return NextResponse.json(existing, { status: 200 })
+      }
+    }
+
+    const parsed = createProfitReportSchema.safeParse(body)
+    if (!parsed.success) {
+      const firstError = parsed.error.issues[0]
+      return NextResponse.json(
+        {
+          error: {
+            code: firstError.path.includes('period') ? 'VAL_002' : 'VAL_001',
+            message: firstError.message,
+            details: parsed.error.issues,
+          },
+        },
+        { status: 422 },
+      )
+    }
+
+    const { period, includeAI } = parsed.data
+
+    const calculator = new PLCalculator(projectId)
+    const plResult = await calculator.calculate(period)
+
+    let aiInsights: string | null = null
+
+    if (includeAI && user.role === UserRole.SOCIO) {
+      try {
+        const { ClaudeCliProvider } = await import('@/lib/ai/claude-cli-provider')
+        const ai = new ClaudeCliProvider()
+        const { buildPLInsightsPrompt } = await import(
+          '@/lib/ai-prompts/pl-insights.prompt'
+        )
+        const prompt = buildPLInsightsPrompt({
+          revenue: plResult.revenue,
+          cost: plResult.cost,
+          margin: plResult.margin,
+          marginPct: plResult.marginPct,
+          hoursLogged: plResult.hoursLogged,
+          billableRatio: plResult.billableRatio,
+          period,
+          teamCosts: plResult.teamCosts.map((t) => ({
+            role: t.role,
+            hours: t.hours,
+            cost: t.cost,
+            pctOfTotal: t.pctOfTotal,
+          })),
+        })
+        aiInsights = await ai.generate(prompt, {
+          system:
+            'Você é um especialista em gestão financeira de projetos de software.',
+          maxTokens: 600,
+        })
+      } catch {
+        // Degraded: insights indisponíveis, relatório ainda é gerado
+        aiInsights = null
+      }
+    }
+
+    const report = await prisma.profitReport.create({
+      data: {
+        projectId,
+        period,
+        periodStart: plResult.startDate,
+        periodEnd: plResult.endDate,
+        revenue: plResult.revenue,
+        cost: plResult.cost,
+        margin: plResult.margin,
+        marginPct: plResult.marginPct,
+        hoursLogged: plResult.hoursLogged,
+        billableHours: plResult.billableHours,
+        teamCosts: plResult.teamCosts as unknown as object[],
+        aiInsights,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...(idempotencyKey ? { idempotencyKey } as any : {}),
+      },
+    })
+
+    await EventBus.publish(
+      EventType.PROFIT_REPORT_GENERATED,
+      projectId,
+      { projectId, marginPct: plResult.marginPct },
+      'rentabilia',
+    )
+
+    return NextResponse.json(report, { status: 201 })
+  } catch (error) {
+    if (error instanceof AppError) {
+      return NextResponse.json(
+        { error: { code: error.code, message: error.message } },
+        { status: error.statusCode },
+      )
+    }
+    return NextResponse.json(
+      { error: { code: 'SYS_001', message: 'Erro interno ao gerar relatório.' } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── GET /api/projects/[id]/profit-reports ────────────────────────────────────
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId, UserRole.PM)
+    requireFinancialAccess(user.role)
+
+    const { searchParams } = new URL(req.url)
+    const page = Math.max(1, parseInt(searchParams.get('page') ?? '1'))
+    const limit = Math.min(parseInt(searchParams.get('limit') ?? '10'), 50)
+    const skip = (page - 1) * limit
+
+    const [reports, total] = await Promise.all([
+      prisma.profitReport.findMany({
+        where: { projectId },
+        orderBy: { generatedAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prisma.profitReport.count({ where: { projectId } }),
+    ])
+
+    // PM não vê aiInsights nem teamCosts com rates individuais
+    const sanitized = reports.map((r: { aiInsights: unknown; teamCosts: unknown; [key: string]: unknown }) => ({
+      ...r,
+      aiInsights: user.role === UserRole.SOCIO ? r.aiInsights : undefined,
+      teamCosts:
+        user.role === UserRole.PM
+          ? (r.teamCosts as Record<string, unknown>[]).map(
+              ({ effectiveRate, rateSource, ...rest }) => rest,
+            )
+          : r.teamCosts,
+    }))
+
+    return NextResponse.json({
+      data: sanitized,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    })
+  } catch (error) {
+    if (error instanceof AppError) {
+      return NextResponse.json(
+        { error: { code: error.code, message: error.message } },
+        { status: error.statusCode },
+      )
+    }
+    return NextResponse.json(
+      { error: { code: 'SYS_001', message: 'Erro interno.' } },
+      { status: 500 },
+    )
+  }
+}

@@ -1,0 +1,139 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { EventBus } from '@/lib/events'
+import { EventType } from '@/lib/constants/events'
+import { indexRequestSchema } from '@/lib/schemas/rag'
+import { DocumentIndexer } from '@/lib/rag/document-indexer'
+import { UserRole } from '@prisma/client'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/rag/index')
+
+// ─── POST /api/projects/[id]/rag/index ──────────────────────────────────────
+// Inicia indexação de documentos. Retorna 202 Accepted (processamento assíncrono).
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId, UserRole.PM)
+
+    const body = await req.json().catch(() => ({}))
+    const { documents: inputDocuments } = indexRequestSchema.parse(body)
+
+    // Verificar se já existe indexação em andamento
+    const existing = await prisma.rAGIndex.findUnique({ where: { projectId } })
+    if (existing?.indexationStatus === 'IN_PROGRESS') {
+      return NextResponse.json(
+        { error: { code: 'HANDOFF_050', message: 'Indexação já em andamento para este projeto.' } },
+        { status: 422 },
+      )
+    }
+
+    // Upsert RAGIndex → IN_PROGRESS
+    const ragIndex = await prisma.rAGIndex.upsert({
+      where: { projectId },
+      create: { projectId, indexationStatus: 'IN_PROGRESS' },
+      update: { indexationStatus: 'IN_PROGRESS' },
+    })
+
+    // Publicar evento de início
+    await EventBus.publish(
+      EventType.RAG_INDEX_STARTED,
+      projectId,
+      { projectId, repoUrl: ragIndex.githubRepoUrl ?? '' },
+      'module-12',
+    )
+
+    // Pipeline assíncrono (não bloqueia response)
+    void (async () => {
+      try {
+        // Criar RAGDocuments se fornecidos no body
+        if (inputDocuments && inputDocuments.length > 0) {
+          for (const doc of inputDocuments) {
+            await prisma.rAGDocument.create({
+              data: {
+                ragIndexId: ragIndex.id,
+                sourceType: doc.sourceType,
+                sourcePath: doc.sourcePath,
+                content: doc.content,
+                metadata: (doc.metadata ?? {}) as Record<string, string>,
+              },
+            })
+          }
+        }
+
+        // Buscar todos os documentos do índice
+        const docs = await prisma.rAGDocument.findMany({
+          where: { ragIndexId: ragIndex.id },
+        })
+
+        if (docs.length === 0) {
+          await prisma.rAGIndex.update({
+            where: { id: ragIndex.id },
+            data: { indexationStatus: 'COMPLETE', totalChunks: 0, lastIndexedAt: new Date() },
+          })
+          return
+        }
+
+        // Executar pipeline
+        const startTime = Date.now()
+        const indexInputs = docs.map((d: { id: string; sourcePath: string; content: string; commitSha?: string | null }) => ({
+          ragIndexId: ragIndex.id,
+          ragDocumentId: d.id,
+          sourcePath: d.sourcePath,
+          content: d.content,
+          commitSha: d.commitSha ?? undefined,
+        }))
+
+        const results = await DocumentIndexer.indexAll(ragIndex.id, indexInputs)
+
+        const totalChunks = results.reduce((acc, r) => acc + r.chunksCreated, 0)
+        const hasErrors = results.some((r) => r.error)
+
+        await prisma.rAGIndex.update({
+          where: { id: ragIndex.id },
+          data: {
+            indexationStatus: hasErrors ? 'FAILED' : 'COMPLETE',
+            totalChunks,
+            lastIndexedAt: new Date(),
+          },
+        })
+
+        await EventBus.publish(
+          EventType.RAG_INDEX_COMPLETED,
+          projectId,
+          { projectId, chunkCount: totalChunks, indexDurationMs: Date.now() - startTime },
+          'module-12',
+        )
+      } catch (asyncErr) {
+        log.error({ err: asyncErr }, '[RAG Index] Pipeline error:')
+        await prisma.rAGIndex.update({
+          where: { id: ragIndex.id },
+          data: { indexationStatus: 'FAILED' },
+        })
+      }
+    })()
+
+    return NextResponse.json(
+      { data: { ragIndexId: ragIndex.id, indexationStatus: 'IN_PROGRESS' } },
+      { status: 202 },
+    )
+  } catch (err) {
+    log.error({ err }, '[RAG Index] Error:')
+    const message = err instanceof Error ? err.message : 'Erro interno'
+    return NextResponse.json({ error: { code: 'SYS_001', message } }, { status: 500 })
+  }
+}

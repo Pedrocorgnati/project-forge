@@ -100,6 +100,33 @@ export const ERROR_CODES = {
     message: 'Brief não encontrado.',
     httpStatus: 404,
   },
+  BRIEF_081: {
+    code: 'BRIEF_081',
+    message: 'Já existe uma sessão ativa para este brief.',
+    httpStatus: 409,
+  },
+  BRIEF_082: {
+    code: 'BRIEF_082',
+    message: 'Brief já foi concluído e não aceita novas sessões.',
+    httpStatus: 422,
+  },
+  BRIEF_083: {
+    code: 'BRIEF_083',
+    message: 'Brief não está completo. Conclua a entrevista antes de prosseguir.',
+    httpStatus: 422,
+  },
+
+  // ── PRD ───────────────────────────────────────────────────────────────────
+  PRD_001: {
+    code: 'PRD_GENERATION_ERROR',
+    message: 'Falha ao gerar o PRD. Tente novamente.',
+    httpStatus: 500,
+  },
+  PRD_080: {
+    code: 'PRD_NOT_FOUND',
+    message: 'PRD ainda não foi gerado para este brief.',
+    httpStatus: 404,
+  },
 
   // ── DOCUMENT ──────────────────────────────────────────────────────────────
   DOC_050: {
@@ -130,15 +157,52 @@ export const ERROR_CODES = {
     httpStatus: 404,
   },
 
+  // ── SCOPE ALERT ───────────────────────────────────────────────────────────
+  SCOPE_050: {
+    code: 'SCOPE_050',
+    message: 'Alerta já foi dismissado e não pode ser alterado.',
+    httpStatus: 409,
+  },
+  SCOPE_051: {
+    code: 'SCOPE_051',
+    message: 'Alerta já está acknowledged.',
+    httpStatus: 409,
+  },
+  SCOPE_080: {
+    code: 'SCOPE_080',
+    message: 'Alerta de escopo não encontrado.',
+    httpStatus: 404,
+  },
+
   // ── CHANGE ORDER ──────────────────────────────────────────────────────────
+  CO_001: {
+    code: 'CO_001',
+    message: 'Permissão insuficiente para esta ação de Change Order.',
+    httpStatus: 403,
+  },
+  CO_020: {
+    code: 'CO_020',
+    message: 'Dados inválidos ou campos obrigatórios ausentes.',
+    httpStatus: 422,
+  },
   CO_050: {
     code: 'CO_050',
     message: 'Change order em status inválido para esta operação.',
-    httpStatus: 422,
+    httpStatus: 409,
+  },
+  CO_051: {
+    code: 'CO_051',
+    message: 'Já existe uma Change Order aguardando aprovação neste projeto.',
+    httpStatus: 409,
   },
   CO_080: {
     code: 'CO_080',
     message: 'Change order não encontrada.',
+    httpStatus: 404,
+  },
+  CO_081: {
+    code: 'CO_081',
+    message: 'Projeto não encontrado.',
     httpStatus: 404,
   },
 
@@ -158,13 +222,53 @@ export const ERROR_CODES = {
     message: 'Prazo de undo (24h) expirado para este registro.',
     httpStatus: 422,
   },
+  TS_053: {
+    code: 'TS_053',
+    message: 'Janela de edição de 7 dias expirada para este registro.',
+    httpStatus: 422,
+  },
+  TS_054: {
+    code: 'TS_054',
+    message: 'Apenas o dono do registro pode editá-lo.',
+    httpStatus: 403,
+  },
+  TS_055: {
+    code: 'TS_055',
+    message: 'Horas devem ser múltiplo de 0.25.',
+    httpStatus: 422,
+  },
+  TS_060: {
+    code: 'TS_060',
+    message: 'Nenhuma configuração de custo ativa para este role.',
+    httpStatus: 422,
+  },
+  TS_061: {
+    code: 'TS_061',
+    message: 'Usuário não é membro deste projeto.',
+    httpStatus: 422,
+  },
+  TS_062: {
+    code: 'TS_062',
+    message: 'Conflito de configuração de custo (unique constraint).',
+    httpStatus: 409,
+  },
   TS_080: {
     code: 'TS_080',
     message: 'Registro de timesheet não encontrado.',
     httpStatus: 404,
   },
+  TS_081: {
+    code: 'TS_081',
+    message: 'Configuração de custo não encontrada.',
+    httpStatus: 404,
+  },
 
   // ── HANDOFF / RAG ─────────────────────────────────────────────────────────
+  HANDOFF_020: {
+    code: 'HANDOFF_020',
+    message: 'URL do repositório inválida.',
+    httpStatus: 400,
+  },
   HANDOFF_050: {
     code: 'HANDOFF_050',
     message: 'Indexação já em andamento para este projeto.',
@@ -175,10 +279,64 @@ export const ERROR_CODES = {
     message: 'Chunk de texto excede o limite de 2048 caracteres.',
     httpStatus: 422,
   },
+  HANDOFF_052: {
+    code: 'HANDOFF_052',
+    message: 'Conteúdo de embedding rejeitado.',
+    httpStatus: 422,
+  },
+  HANDOFF_053: {
+    code: 'HANDOFF_053',
+    message: 'Dimensão do vetor de embedding incompatível.',
+    httpStatus: 422,
+  },
+  HANDOFF_060: {
+    code: 'HANDOFF_060',
+    message: 'Acesso negado ao repositório. Verifique as permissões do token.',
+    httpStatus: 422,
+  },
+  HANDOFF_061: {
+    code: 'HANDOFF_061',
+    message: 'Repositório muito grande. Indexando apenas extensões relevantes.',
+    httpStatus: 422,
+  },
   HANDOFF_080: {
     code: 'HANDOFF_080',
     message: 'Índice RAG não encontrado.',
     httpStatus: 404,
+  },
+
+  // ── CLIENT PORTAL / APPROVAL ──────────────────────────────────────────────
+  APPROVAL_080: {
+    code: 'APPROVAL_080',
+    message: 'Convite ativo já existe para este email/projeto.',
+    httpStatus: 409,
+  },
+  APPROVAL_081: {
+    code: 'APPROVAL_081',
+    message: 'Token de convite não encontrado.',
+    httpStatus: 404,
+  },
+  APPROVAL_082: {
+    code: 'APPROVAL_082',
+    message: 'Este convite já foi utilizado.',
+    httpStatus: 409,
+  },
+  APPROVAL_083: {
+    code: 'APPROVAL_083',
+    message: 'Este convite foi revogado.',
+    httpStatus: 410,
+  },
+
+  // ── APPROVAL WORKFLOW (module-17) ──────────────────────────────────────────
+  APPROVAL_050: {
+    code: 'APPROVAL_050',
+    message: 'Cliente não encontrado ou sem acesso ativo neste projeto.',
+    httpStatus: 404,
+  },
+  APPROVAL_051: {
+    code: 'APPROVAL_051',
+    message: 'Esta aprovação já foi respondida.',
+    httpStatus: 409,
   },
 
   // ── RATE LIMIT ────────────────────────────────────────────────────────────
@@ -191,6 +349,18 @@ export const ERROR_CODES = {
     code: 'RATE_002',
     message: 'Limite de indexações atingido. Máximo 5 por hora.',
     httpStatus: 429,
+  },
+
+  // ── ESTIMATE ──────────────────────────────────────────────────────────────
+  ESTIMATE_050: {
+    code: 'ESTIMATE_050',
+    message: 'Custo total abaixo do mínimo de mercado para este tipo de projeto.',
+    httpStatus: 422,
+  },
+  ESTIMATE_080: {
+    code: 'ESTIMATE_080',
+    message: 'Estimativa não encontrada.',
+    httpStatus: 404,
   },
 
   // ── SYSTEM ────────────────────────────────────────────────────────────────

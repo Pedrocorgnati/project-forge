@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
+import { STORAGE_KEYS } from '@/lib/constants/storage-keys'
 
 type DegradedModule = 'BRIEFFORGE' | 'ESTIMAI' | 'HANDOFFAI'
 
@@ -15,31 +16,44 @@ interface DegradedBannerProps {
   module: DegradedModule
   isAvailable?: boolean
   onDismiss?: () => void
+  /** Se fornecido, exibe countdown e chama onRetry quando chegar a 0 */
+  retryAfterMs?: number
+  onRetry?: () => void
   className?: string
 }
 
-export function DegradedBanner({ module, isAvailable = false, onDismiss, className }: DegradedBannerProps) {
-  // Lazy init: lê localStorage apenas na montagem, evitando setState em efeito
+export function DegradedBanner({ module, isAvailable = false, onDismiss, retryAfterMs, onRetry, className }: DegradedBannerProps) {
   const [dismissed, setDismissed] = useState(() => {
     if (typeof window === 'undefined') return false
-    return localStorage.getItem(`degraded-${module}`) === 'true'
+    return localStorage.getItem(STORAGE_KEYS.DEGRADED_FLAG(module)) === 'true'
   })
+  const [secondsLeft, setSecondsLeft] = useState(() =>
+    retryAfterMs != null ? Math.ceil(retryAfterMs / 1000) : null
+  )
 
-  // Limpa localStorage quando serviço se recupera (sem setState — sem cascata de renders)
   useEffect(() => {
     if (isAvailable) {
-      localStorage.removeItem(`degraded-${module}`)
+      localStorage.removeItem(STORAGE_KEYS.DEGRADED_FLAG(module))
     }
   }, [isAvailable, module])
 
-  // Quando o serviço está disponível, trata como não dispensado (derivado, sem estado extra)
+  // Countdown timer que chama onRetry ao zerar
+  useEffect(() => {
+    if (secondsLeft == null || secondsLeft <= 0) {
+      if (secondsLeft === 0) onRetry?.()
+      return
+    }
+    const id = setInterval(() => setSecondsLeft((s) => (s != null ? s - 1 : null)), 1000)
+    return () => clearInterval(id)
+  }, [secondsLeft, onRetry])
+
   const effectiveDismissed = !isAvailable && dismissed
 
   if (isAvailable || effectiveDismissed) return null
 
   const handleDismiss = () => {
     setDismissed(true)
-    localStorage.setItem(`degraded-${module}`, 'true')
+    localStorage.setItem(STORAGE_KEYS.DEGRADED_FLAG(module), 'true')
     onDismiss?.()
   }
 
@@ -68,6 +82,11 @@ export function DegradedBanner({ module, isAvailable = false, onDismiss, classNa
       <div className="flex-1 min-w-0">
         <p className="text-sm font-semibold leading-5">Modo Limitado</p>
         <p className="text-sm leading-5 mt-0.5">{moduleMessages[module]}</p>
+        {secondsLeft != null && secondsLeft > 0 && (
+          <p className="text-xs leading-5 mt-0.5 text-amber-600 dark:text-amber-400">
+            Tentando reconectar em {secondsLeft}s...
+          </p>
+        )}
       </div>
       <button
         type="button"

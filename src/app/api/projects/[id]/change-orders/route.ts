@@ -1,0 +1,197 @@
+// ─── CHANGE ORDERS ROUTE ──────────────────────────────────────────────────────
+// module-11-scopeshield-change-orders / TASK-1 (ST002 + ST003)
+// GET  /api/projects/[id]/change-orders — listar COs com RBAC de acesso
+// POST /api/projects/[id]/change-orders — criar CO com status DRAFT
+// Rastreabilidade: INT-072
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { CreateChangeOrderSchema } from '@/lib/schemas/change-order'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { EventBus } from '@/lib/events/bus'
+import { EventType } from '@/lib/constants/events'
+import { UserRole } from '@prisma/client'
+import { mapCO } from '@/lib/utils/change-order'
+import { AppError } from '@/lib/errors'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/change-orders')
+
+function sanitizeForDev(co: ReturnType<typeof mapCO>) {
+  const { impactHours: _h, impactCost: _c, hoursImpact: _hi, costImpact: _ci, ...rest } = co as any
+  return rest
+}
+
+// ─── GET ──────────────────────────────────────────────────────────────────────
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const { searchParams } = new URL(req.url)
+    const statusFilter = searchParams.get('status') ?? undefined
+
+    // CLIENTE: apenas COs APPROVED
+    const whereStatus =
+      user.role === UserRole.CLIENTE
+        ? { status: 'APPROVED' as const }
+        : statusFilter
+          ? { status: statusFilter as any }
+          : {}
+
+    const cos = await prisma.changeOrder.findMany({
+      where: { projectId, ...whereStatus },
+      include: {
+        creator: { select: { id: true, name: true, role: true } },
+        tasks: { select: { taskId: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    const mapped = cos.map(mapCO)
+
+    // DEV: ocultar campos financeiros sensíveis
+    const result = user.role === UserRole.DEV ? mapped.map(sanitizeForDev) : mapped
+
+    return NextResponse.json(result)
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[GET /change-orders]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── POST ─────────────────────────────────────────────────────────────────────
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  // Apenas PM e SOCIO podem criar COs
+  if (!([UserRole.PM, UserRole.SOCIO] as string[]).includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.CO_001.code, message: 'Apenas PM ou Sócio podem criar Change Orders.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const body = await req.json()
+    const parsed = CreateChangeOrderSchema.safeParse(body)
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_020.code, message: parsed.error.issues[0]?.message ?? 'Dados inválidos.' } },
+        { status: 422 },
+      )
+    }
+
+    // Buscar taxa horária do projeto para calcular impactCost
+    // Note: hourlyRate adicionado via migration — cast necessário até `prisma generate`
+    const project = await prisma.project.findUnique({
+      where: { id: projectId },
+      select: { id: true, hourlyRate: true } as any,
+    }) as any
+    if (!project) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_081.code, message: ERROR_CODES.CO_081.message } },
+        { status: 404 },
+      )
+    }
+
+    const impactCost = Number(parsed.data.impactHours) * Number(project?.hourlyRate ?? 0)
+
+    // Verificar que affectedTaskIds pertencem ao projeto
+    if (parsed.data.affectedTaskIds.length > 0) {
+      const tasks = await prisma.task.findMany({
+        where: { id: { in: parsed.data.affectedTaskIds }, projectId },
+        select: { id: true },
+      })
+      if (tasks.length !== parsed.data.affectedTaskIds.length) {
+        return NextResponse.json(
+          { error: { code: ERROR_CODES.CO_020.code, message: 'Uma ou mais tasks não pertencem a este projeto.' } },
+          { status: 422 },
+        )
+      }
+    }
+
+    const co = await prisma.changeOrder.create({
+      data: {
+        projectId,
+        title: parsed.data.title,
+        description: parsed.data.description,
+        hoursImpact: parsed.data.impactHours,
+        costImpact: impactCost,
+        status: 'DRAFT' as any,
+        createdBy: user.id,
+        tasks: {
+          create: parsed.data.affectedTaskIds.map((taskId) => ({ taskId })),
+        },
+      } as any,
+      include: {
+        creator: { select: { id: true, name: true, role: true } },
+        tasks: { select: { taskId: true } },
+      },
+    })
+
+    // Publicar evento CHANGE_ORDER_CREATED
+    await EventBus.publish(
+      EventType.CHANGE_ORDER_CREATED,
+      projectId,
+      {
+        projectId,
+        changeOrderId: co.id,
+        impactBRL: impactCost,
+      },
+      'module-11',
+    )
+
+    return NextResponse.json(mapCO(co), { status: 201 })
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[POST /change-orders]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

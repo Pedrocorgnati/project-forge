@@ -1,6 +1,8 @@
 'use client'
 
+import Image from 'next/image'
 import { useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -12,6 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Input, PasswordInput } from '@/components/ui/input'
 import { FormField } from '@/components/ui/form-field'
 import { toast } from '@/components/ui/toast'
+import { createClient } from '@/lib/supabase/client'
 
 const loginSchema = z.object({
   email: z.string().email('E-mail inválido'),
@@ -23,6 +26,10 @@ type LoginFormData = z.infer<typeof loginSchema>
 type Tab = 'interno' | 'cliente'
 
 export default function LoginPage() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const nextParam = searchParams.get('next') ?? ROUTES.DASHBOARD
+
   const [activeTab, setActiveTab] = useState<Tab>('interno')
   const [isLoadingGithub, setIsLoadingGithub] = useState(false)
   const [authError, setAuthError] = useState<string | null>(null)
@@ -31,52 +38,45 @@ export default function LoginPage() {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<LoginFormData>({ resolver: zodResolver(loginSchema) })
+  } = useForm<LoginFormData>({ resolver: zodResolver(loginSchema), mode: 'onBlur' })
 
   async function handleGithubLogin() {
     setIsLoadingGithub(true)
     try {
-      // TODO: Implementar backend - Supabase OAuth GitHub
-      throw new Error('Not implemented - run /auto-flow execute')
+      const supabase = createClient()
+      const callbackUrl = `${window.location.origin}/api/auth/callback?next=${encodeURIComponent(nextParam)}`
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: 'github',
+        options: { redirectTo: callbackUrl },
+      })
+      if (error) throw error
     } catch {
       toast.error('Falha ao conectar com GitHub. Tente novamente.')
-    } finally {
       setIsLoadingGithub(false)
     }
+    // On success the browser is redirected by Supabase — no finally needed
   }
 
   async function onSubmit(data: LoginFormData) {
     setAuthError(null)
-    try {
-      // TODO: Implementar backend - Supabase signInWithPassword
-      void data
-      throw new Error('Not implemented - run /auto-flow execute')
-    } catch {
-      setAuthError('E-mail ou senha incorretos. Verifique seus dados e tente novamente.')
+    const supabase = createClient()
+    const { error } = await supabase.auth.signInWithPassword({
+      email: data.email,
+      password: data.password,
+    })
+    if (error) {
+      setAuthError('E-mail ou senha incorretos.')
+      return
     }
+    // Middleware handles MFA redirect for CLIENTE role; push to next destination for interno
+    router.push(nextParam)
   }
 
   return (
     <div data-testid="login-container" className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
       {/* Header */}
       <div className="px-8 pt-8 pb-6 text-center">
-        {/* @ASSET_PLACEHOLDER
-name: logo-symbol
-type: image
-extension: svg
-format: 1:1
-dimensions: 40x40
-description: Logo símbolo do ProjectForge em formato vetorial. Forma geométrica abstrata representando fluxo de trabalho e integração de módulos de gestão de projetos.
-context: Tela de login, centralizado acima do título
-style: Minimalista, linhas finas, monocromático
-mood: Profissional, moderno, confiável
-colors: primary (#6366f1), background (#ffffff)
-elements: Forma geométrica abstrata com iniciais PF estilizadas
-avoid: Gradientes, sombras complexas, texto descritivo
-*/}
-        <div className="w-10 h-10 bg-brand rounded-xl mx-auto mb-4 flex items-center justify-center">
-          <span className="text-white font-bold text-sm">PF</span>
-        </div>
+        <Image src="/images/logo-symbol.svg" alt="ProjectForge" width={40} height={40} className="mx-auto mb-4" priority />
         <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50">
           Entrar no ProjectForge
         </h1>

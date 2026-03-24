@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { FormField } from '@/components/ui/form-field'
 import { toast } from '@/components/ui/toast'
+import { createClient } from '@/lib/supabase/client'
 import { ROUTES } from '@/lib/constants'
 
 const schema = z.object({
@@ -25,13 +26,17 @@ export default function ForgotPasswordPage() {
     register,
     handleSubmit,
     formState: { errors, isSubmitting },
-  } = useForm<FormData>({ resolver: zodResolver(schema) })
+  } = useForm<FormData>({ resolver: zodResolver(schema), mode: 'onBlur' })
 
   async function onSubmit(data: FormData) {
     try {
-      // TODO: Implementar backend - Supabase resetPasswordForEmail
-      void data
-      throw new Error('Not implemented - run /auto-flow execute')
+      // RESOLVED: DEBT-001
+      const supabase = createClient()
+      const { error } = await supabase.auth.resetPasswordForEmail(data.email, {
+        redirectTo: `${window.location.origin}/auth/callback?next=/redefinir-senha`,
+      })
+      if (error) throw error
+      setSent(true)
     } catch {
       toast.error('Não foi possível enviar o e-mail. Tente novamente.')
     }

@@ -1,0 +1,137 @@
+// ─── SUBMIT CHANGE ORDER ROUTE ────────────────────────────────────────────────
+// module-11-scopeshield-change-orders / TASK-1 (ST004)
+// PATCH /api/projects/[id]/change-orders/[coId]/submit
+// Transição: DRAFT → PENDING_APPROVAL
+// Rastreabilidade: INT-072
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { EventBus } from '@/lib/events/bus'
+import { EventType } from '@/lib/constants/events'
+import { UserRole } from '@prisma/client'
+import { AppError } from '@/lib/errors'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/change-order/submit')
+
+type Params = { id: string; coId: string }
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<Params> },
+): Promise<NextResponse> {
+  const { id: projectId, coId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  if (!([UserRole.PM, UserRole.SOCIO] as string[]).includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.CO_001.code, message: 'Apenas PM ou Sócio podem submeter Change Orders.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const co = await prisma.changeOrder.findUnique({
+      where: { id: coId },
+      select: {
+        id: true,
+        projectId: true,
+        status: true,
+        createdBy: true,
+        title: true,
+        hoursImpact: true,
+      },
+    })
+
+    if (!co || co.projectId !== projectId) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_080.code, message: ERROR_CODES.CO_080.message } },
+        { status: 404 },
+      )
+    }
+
+    if (co.status !== 'DRAFT') {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_050.code, message: 'Apenas COs em DRAFT podem ser submetidas.' } },
+        { status: 409 },
+      )
+    }
+
+    if (co.createdBy !== user.id) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_001.code, message: 'Apenas o criador pode submeter a Change Order.' } },
+        { status: 403 },
+      )
+    }
+
+    // Verificar que não existe outra CO em PENDING_APPROVAL para este projeto
+    // Note: PENDING_APPROVAL adicionado via migration — cast até `prisma generate`
+    const pendingExists = await prisma.changeOrder.findFirst({
+      where: { projectId, status: 'PENDING_APPROVAL' as any },
+      select: { id: true },
+    })
+    if (pendingExists) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_051.code, message: ERROR_CODES.CO_051.message } },
+        { status: 409 },
+      )
+    }
+
+    const updated = await prisma.changeOrder.update({
+      where: { id: coId },
+      data: { status: 'PENDING_APPROVAL' as any },
+      include: {
+        creator: { select: { id: true, name: true, role: true } },
+        tasks: { select: { taskId: true } },
+      },
+    })
+
+    // Publicar evento CHANGE_ORDER_SUBMITTED (notifica SOCIOs)
+    await EventBus.publish(
+      EventType.CHANGE_ORDER_SUBMITTED,
+      projectId,
+      {
+        projectId,
+        changeOrderId: co.id,
+        title: co.title,
+        impactHours: Number(co.hoursImpact),
+        requestedBy: user.id,
+      },
+      'module-11',
+    )
+
+    const updatedAny = updated as any
+    return NextResponse.json({
+      ...updated,
+      impactHours: Number(updated.hoursImpact),
+      impactCost: Number(updated.costImpact),
+      requestedBy: updated.createdBy,
+      requestedAt: updated.createdAt,
+      affectedTaskIds: (updatedAny.tasks ?? []).map((t: any) => t.taskId),
+    })
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[PATCH /change-orders/[coId]/submit]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

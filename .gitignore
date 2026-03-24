@@ -1,51 +1,68 @@
-# Obrigatorio (todas as stacks)
-.env
-.env*.local
-test-users.md
-.env.local.bak
+# Dependencies
+node_modules/
+/.pnp
+.pnp.*
 
 # Next.js
-node_modules/
-.next/
-out/
+/.next/
+/out/
+/build
 .turbo/
 
+# Environment variables — NUNCA commitar
+.env
+.env*.local
+.env.local.bak
+.env.production
+.env.staging
+.env.docker
+# EXCECAO: .env.example e .env.{env}.example sao versionaveis
+!.env.example
+!.env.*.example
+!.env.docker.example
 
-
-
-
-
-
-
-/build
+# Testing
 /coverage
-# debug
-# dependencies
-.DS_Store
-.env*
-# env files (can opt-in for committing if needed)
-# misc
-/.next/
-next-env.d.ts
-# next.js
-/node_modules
+test-users.md
+test-users.json
+
+# Debug
 npm-debug.log*
-/out/
-*.pem
-.pnp.*
-/.pnp
-.pnpm-debug.log*
-# production
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-# testing
-*.tsbuildinfo
-# typescript
-# vercel
-.vercel
-.yarn/*
 yarn-debug.log*
 yarn-error.log*
+.pnpm-debug.log*
+
+# Misc
+.DS_Store
+*.pem
+output/
+.stryker-tmp/
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Prisma
+prisma/dev.db
+prisma/dev.db-journal
+prisma/migrations/*.sql.bak
+
+# Yarn
+.yarn/*
 !.yarn/patches
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
+
+# Playwright
+e2e/.auth/
+playwright-report/
+test-results/
+.env.test
+
+# Load test results
+tests/load/results/*.json
+tests/load/results/*.html

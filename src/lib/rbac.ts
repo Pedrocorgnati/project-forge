@@ -16,12 +16,26 @@ const ROLE_HIERARCHY: Record<UserRole, number> = {
  * Verifica se o usuário tem acesso ao projeto.
  * Retorna o role do usuário no projeto.
  * Lança AppError AUTH_003 se não for membro.
+ *
+ * **SOCIO bypass:** Se o usuário possui role global SOCIO, o check de vínculo
+ * com o projeto é ignorado — SOCIO pode acessar qualquer projeto da plataforma.
+ * Ref: TASK-3/ST002.
  */
 export async function withProjectAccess(
   userId: string,
   projectId: string,
   requiredRole?: UserRole,
 ): Promise<{ projectRole: UserRole }> {
+  // SOCIO bypass: verificar role global antes de checar vínculo com o projeto
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true },
+  })
+
+  if (user?.role === UserRole.SOCIO) {
+    return { projectRole: UserRole.SOCIO }
+  }
+
   const member = await prisma.projectMember.findUnique({
     where: {
       projectId_userId: { projectId, userId },
@@ -40,7 +54,7 @@ export async function withProjectAccess(
     throw new AppError(ERROR_CODES.AUTH_003.code, ERROR_CODES.AUTH_003.message, 403)
   }
 
-  // Cross-org check: SOCIO bypass apenas dentro da própria org
+  // Cross-org check
   if (member.project.organizationId !== member.user.organizationId) {
     throw new AppError(ERROR_CODES.AUTH_006.code, ERROR_CODES.AUTH_006.message, 403)
   }

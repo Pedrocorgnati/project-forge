@@ -1,0 +1,33 @@
+export const MESSAGES = {
+  SUCCESS: {
+    SAVED: 'Salvo com sucesso',
+    CREATED: 'Criado com sucesso',
+    DELETED: 'Excluído com sucesso',
+    SENT: 'Enviado com sucesso',
+    APPROVED: 'Aprovado com sucesso',
+    REJECTED: 'Rejeitado',
+    COPIED: 'Copiado para a área de transferência',
+    IMPORTED: 'Importado com sucesso',
+    EXPORTED: 'Exportado com sucesso',
+  },
+  ERROR: {
+    GENERIC: 'Ocorreu um erro. Tente novamente.',
+    NOT_FOUND: 'Item não encontrado',
+    UNAUTHORIZED: 'Você não tem permissão para esta ação',
+    UNAUTHENTICATED: 'Sessão expirada. Faça login novamente.',
+    NETWORK: 'Erro de conexão. Verifique sua internet.',
+    AI_UNAVAILABLE: 'IA temporariamente indisponível. Modo limitado ativo.',
+    VALIDATION: 'Verifique os campos e tente novamente',
+    CONFLICT: 'Este item já existe ou está em uso.',
+    RATE_LIMIT: 'Muitas tentativas. Aguarde antes de tentar novamente.',
+  },
+  LOADING: {
+    DEFAULT: 'Carregando...',
+    SAVING: 'Salvando...',
+    SENDING: 'Enviando...',
+    DELETING: 'Excluindo...',
+    AI_THINKING: 'IA processando...',
+    INDEXING: 'Indexando repositório...',
+    GENERATING: 'Gerando...',
+  },
+} as const

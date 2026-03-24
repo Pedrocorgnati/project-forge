@@ -1,0 +1,188 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { AppError } from '@/lib/errors'
+import { UserRole } from '@prisma/client'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/estimate')
+
+// ─── GET /api/projects/[id]/estimates/[estimateId] ────────────────────────────
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string; estimateId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, estimateId } = await params
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const estimate = await prisma.estimate.findUnique({
+      where: { id: estimateId, projectId },
+      include: {
+        items: { orderBy: { category: 'asc' } },
+        versions: {
+          orderBy: { version: 'desc' },
+          include: { changer: { select: { name: true, avatarUrl: true } } },
+        },
+      },
+    })
+
+    if (!estimate) {
+      return NextResponse.json(
+        { error: { code: 'ESTIMATE_080', message: 'Estimativa não encontrada.' } },
+        { status: 404 },
+      )
+    }
+
+    return NextResponse.json({ data: estimate })
+  } catch (err) {
+    if (err instanceof AppError) {
+      return NextResponse.json({ error: { code: err.code, message: err.message } }, { status: err.statusCode })
+    }
+    return NextResponse.json(
+      { error: { code: 'SYS_001', message: 'Erro interno.' } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── PATCH /api/projects/[id]/estimates/[estimateId] ──────────────────────────
+
+const PatchEstimateSchema = z.object({
+  currency: z.string().length(3).optional(),
+  items: z.array(z.object({
+    id: z.string().uuid(),
+    hoursMin: z.number().positive().optional(),
+    hoursMax: z.number().positive().optional(),
+    hourlyRate: z.number().positive().optional(),
+    riskFactor: z.number().min(1.0).max(1.5).optional(),
+  })).optional(),
+})
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string; estimateId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, estimateId } = await params
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId, UserRole.PM)
+
+    let body: unknown
+    try {
+      body = await req.json()
+    } catch {
+      return NextResponse.json(
+        { error: { code: 'VAL_001', message: 'Payload JSON inválido.' } },
+        { status: 422 },
+      )
+    }
+
+    const parsed = PatchEstimateSchema.safeParse(body)
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: { code: 'VAL_001', message: 'Dados inválidos.', details: parsed.error.flatten() } },
+        { status: 400 },
+      )
+    }
+
+    const estimate = await prisma.estimate.findUnique({
+      where: { id: estimateId, projectId },
+    })
+
+    if (!estimate) {
+      return NextResponse.json(
+        { error: { code: 'ESTIMATE_080', message: 'Estimativa não encontrada.' } },
+        { status: 404 },
+      )
+    }
+
+    if (estimate.status !== 'READY') {
+      return NextResponse.json(
+        { error: { code: 'VAL_001', message: 'Só é possível editar estimativas com status READY.' } },
+        { status: 422 },
+      )
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updated = await prisma.$transaction(async (tx: any) => {
+      // Atualizar currency se fornecido
+      if (parsed.data.currency) {
+        await tx.estimate.update({
+          where: { id: estimateId },
+          data: { currency: parsed.data.currency },
+        })
+      }
+
+      // Atualizar items se fornecidos
+      if (parsed.data.items) {
+        for (const item of parsed.data.items) {
+          const updateData: Record<string, number> = {}
+          if (item.hoursMin !== undefined) updateData.hoursMin = item.hoursMin
+          if (item.hoursMax !== undefined) updateData.hoursMax = item.hoursMax
+          if (item.hourlyRate !== undefined) updateData.hourlyRate = item.hourlyRate
+          if (item.riskFactor !== undefined) updateData.riskFactor = item.riskFactor
+
+          // Recalcular custos se horas ou rate mudaram
+          const existing = await tx.estimateItem.findUnique({ where: { id: item.id } })
+          if (existing) {
+            const hours_min = item.hoursMin ?? Number(existing.hoursMin)
+            const hours_max = item.hoursMax ?? Number(existing.hoursMax)
+            const rate = item.hourlyRate ?? Number(existing.hourlyRate)
+            const risk = item.riskFactor ?? Number(existing.riskFactor)
+            updateData.costMin = hours_min * rate * risk
+            updateData.costMax = hours_max * rate * risk
+
+            await tx.estimateItem.update({
+              where: { id: item.id },
+              data: updateData,
+            })
+          }
+        }
+
+        // Recalcular totais
+        const allItems = await tx.estimateItem.findMany({ where: { estimateId } })
+        const totalMin = allItems.reduce((s: number, i: { hoursMin: unknown; hoursMax: unknown }) => s + Number(i.hoursMin), 0)
+        const totalMax = allItems.reduce((s: number, i: { hoursMin: unknown; hoursMax: unknown }) => s + Number(i.hoursMax), 0)
+        await tx.estimate.update({
+          where: { id: estimateId },
+          data: { totalMin, totalMax },
+        })
+      }
+
+      return tx.estimate.findUnique({
+        where: { id: estimateId },
+        include: { items: { orderBy: { category: 'asc' } } },
+      })
+    })
+
+    return NextResponse.json({ data: updated })
+  } catch (err) {
+    if (err instanceof AppError) {
+      return NextResponse.json({ error: { code: err.code, message: err.message } }, { status: err.statusCode })
+    }
+    log.error({ err }, '[PATCH /api/projects/[id]/estimates/[estimateId]]')
+    return NextResponse.json(
+      { error: { code: 'SYS_001', message: 'Erro interno.' } },
+      { status: 500 },
+    )
+  }
+}

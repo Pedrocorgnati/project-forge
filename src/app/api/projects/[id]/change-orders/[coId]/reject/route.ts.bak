@@ -1,0 +1,134 @@
+// ─── REJECT CHANGE ORDER ROUTE ────────────────────────────────────────────────
+// module-11-scopeshield-change-orders / TASK-1 (ST004)
+// PATCH /api/projects/[id]/change-orders/[coId]/reject
+// Transição: PENDING_APPROVAL → REJECTED (apenas SOCIO, reason obrigatória)
+// Rastreabilidade: INT-072
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { RejectChangeOrderSchema } from '@/lib/schemas/change-order'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { EventBus } from '@/lib/events/bus'
+import { EventType } from '@/lib/constants/events'
+import { UserRole } from '@prisma/client'
+
+type Params = { id: string; coId: string }
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<Params> },
+): Promise<NextResponse> {
+  const { id: projectId, coId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  // Apenas SOCIO pode rejeitar — validação por role, não por identidade
+  if (user.role !== UserRole.SOCIO) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.CO_001.code, message: 'Apenas Sócio pode rejeitar Change Orders.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    // Validar reason antes de buscar a CO
+    const body = await req.json()
+    const parsed = RejectChangeOrderSchema.safeParse(body)
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_020.code, message: parsed.error.issues[0]?.message ?? 'Motivo inválido.' } },
+        { status: 422 },
+      )
+    }
+
+    const co = await prisma.changeOrder.findUnique({
+      where: { id: coId },
+      select: { id: true, projectId: true, status: true, createdBy: true, title: true },
+    })
+
+    if (!co || co.projectId !== projectId) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.CO_080.code, message: ERROR_CODES.CO_080.message } },
+        { status: 404 },
+      )
+    }
+
+    if ((co.status as any) !== 'PENDING_APPROVAL') {
+      return NextResponse.json(
+        {
+          error: {
+            code: ERROR_CODES.CO_050.code,
+            message: `Change Order não pode ser rejeitada (status atual: ${co.status}).`,
+          },
+        },
+        { status: 409 },
+      )
+    }
+
+    const updated = await prisma.changeOrder.update({
+      where: { id: coId },
+      data: {
+        status: 'REJECTED' as any,
+        // Note: rejectedBy/rejectedAt/rejectionReason adicionados via migration — cast até `prisma generate`
+        rejectedBy: user.id,
+        rejectedAt: new Date(),
+        rejectionReason: parsed.data.reason,
+      } as any,
+      include: {
+        creator: { select: { id: true, name: true, role: true } },
+        tasks: { select: { taskId: true } },
+      },
+    })
+
+    // Publicar evento CHANGE_ORDER_REJECTED (handler notifica PM com motivo)
+    try {
+      await EventBus.publish(
+        EventType.CHANGE_ORDER_REJECTED,
+        projectId,
+        {
+          projectId,
+          changeOrderId: co.id,
+          rejectedBy: user.id,
+          reason: parsed.data.reason,
+          requestedBy: co.createdBy,
+        },
+        'module-11',
+      )
+    } catch (eventErr) {
+      // DEGRADED: falha no EventBus não reverte a rejeição
+      console.error('[CHANGE_ORDER_REJECTED] EventBus falhou:', eventErr)
+    }
+
+    const updatedAny = updated as any
+    return NextResponse.json({
+      ...updated,
+      impactHours: Number(updated.hoursImpact),
+      impactCost: Number(updated.costImpact),
+      requestedBy: updated.createdBy,
+      requestedAt: updated.createdAt,
+      affectedTaskIds: (updatedAny.tasks ?? []).map((t: any) => t.taskId),
+    })
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[PATCH /change-orders/[coId]/reject]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

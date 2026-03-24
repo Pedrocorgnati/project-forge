@@ -11,7 +11,7 @@ export function Toaster() {
           toast: 'bg-slate-800 border border-slate-700 text-slate-50 shadow-lg rounded-lg',
           title: 'text-sm font-medium text-slate-50',
           description: 'text-xs text-slate-400',
-          actionButton: 'bg-indigo-500 text-white text-xs rounded px-2 py-1',
+          actionButton: 'bg-brand text-white text-xs rounded px-2 py-1',
           cancelButton: 'bg-slate-700 text-slate-300 text-xs rounded px-2 py-1',
           closeButton: 'text-slate-400 hover:text-slate-200',
         },

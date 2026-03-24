@@ -1,13 +1,19 @@
+'use client'
+
+// src/app/(app)/projetos/page.tsx
+// module-20-integration — fix ECU gap: "Novo projeto" agora abre CreateProjectModal
+
+import { useState } from 'react'
 import { FolderOpen, Plus } from 'lucide-react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { EmptyState } from '@/components/ui/empty-state'
-import type { Metadata } from 'next'
-
-export const metadata: Metadata = { title: 'Projetos' }
+import { CreateProjectModal } from '@/components/projects/CreateProjectModal'
 
 export default function ProjectsPage() {
+  const [showCreate, setShowCreate] = useState(false)
+
   return (
     <div data-testid="projetos-page" className="space-y-6">
       <div className="flex items-center justify-between">
@@ -17,7 +23,12 @@ export default function ProjectsPage() {
             Gerencie todos os projetos da sua equipe
           </p>
         </div>
-        <Button data-testid="projetos-create-button" variant="primary" className="gap-2">
+        <Button
+          data-testid="projetos-create-button"
+          variant="primary"
+          className="gap-2"
+          onClick={() => setShowCreate(true)}
+        >
           <Plus size={16} aria-hidden="true" />
           Novo projeto
         </Button>
@@ -38,6 +49,8 @@ export default function ProjectsPage() {
           />
         </CardContent>
       </Card>
+
+      <CreateProjectModal open={showCreate} onOpenChange={setShowCreate} />
     </div>
   )
 }

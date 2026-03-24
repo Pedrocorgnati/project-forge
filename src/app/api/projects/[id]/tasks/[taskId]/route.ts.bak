@@ -1,0 +1,258 @@
+// src/app/api/projects/[id]/tasks/[taskId]/route.ts
+// GET — detalhe | PATCH — atualização parcial com RBAC granular | DELETE — remover
+// Módulo: module-9-scopeshield-board | Rastreabilidade INTAKE: INT-060
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { UpdateTaskSchema } from '@/lib/schemas/task'
+import { EventBus } from '@/lib/events'
+import { EventType } from '@/lib/constants/events'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { UserRole } from '@prisma/client'
+
+// ─── Seletor padrão do assignee ───────────────────────────────────────────────
+
+const ASSIGNEE_SELECT = { id: true, name: true, avatarUrl: true } as const
+
+// ─── GET /api/projects/[id]/tasks/[taskId] ───────────────────────────────────
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string; taskId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, taskId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const task = await prisma.task.findUnique({
+      where: { id: taskId, projectId },
+      include: { assignee: { select: ASSIGNEE_SELECT } },
+    })
+
+    if (!task) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.TASK_080.code, message: ERROR_CODES.TASK_080.message } },
+        { status: 404 },
+      )
+    }
+
+    return NextResponse.json(task)
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[GET /tasks/:id]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── PATCH /api/projects/[id]/tasks/[taskId] ─────────────────────────────────
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string; taskId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, taskId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const task = await prisma.task.findUnique({
+      where: { id: taskId, projectId },
+    })
+
+    if (!task) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.TASK_080.code, message: ERROR_CODES.TASK_080.message } },
+        { status: 404 },
+      )
+    }
+
+    const body   = await req.json()
+    const parsed = UpdateTaskSchema.safeParse(body)
+
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.VAL_001.code, message: issue?.message ?? 'Dados inválidos.' } },
+        { status: 422 },
+      )
+    }
+
+    // ─── RBAC granular por campo ──────────────────────────────────────────────
+    const isOwner     = user.id === task.assigneeId
+    const isPMOrSocio = ([UserRole.PM as string, UserRole.SOCIO as string]).includes(user.role)
+    const isDev       = user.role === (UserRole.DEV as string)
+
+    // CLIENTE não pode editar nada
+    if (user.role === (UserRole.CLIENTE as string)) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: 'Clientes não podem editar tasks.' } },
+        { status: 403 },
+      )
+    }
+
+    const allowedData: Record<string, unknown> = {}
+
+    // status e actualHours: PM/SOCIO ou DEV para suas próprias tasks
+    if (parsed.data.status !== undefined && (isPMOrSocio || (isDev && isOwner))) {
+      allowedData.status = parsed.data.status
+    }
+    if (parsed.data.actualHours !== undefined && (isPMOrSocio || (isDev && isOwner))) {
+      allowedData.actualHours = parsed.data.actualHours
+    }
+
+    // position: todos exceto CLIENTE (drag-and-drop)
+    if (parsed.data.position !== undefined) {
+      allowedData.position = parsed.data.position
+    }
+
+    // DEV pode se auto-atribuir
+    if (isDev && parsed.data.assigneeId === user.id) {
+      allowedData.assigneeId = user.id
+    }
+
+    // Campos restritos a PM/SOCIO
+    if (isPMOrSocio) {
+      const { status, actualHours, position, ...pmFields } = parsed.data
+      for (const [key, value] of Object.entries(pmFields)) {
+        if (value !== undefined) {
+          allowedData[key] = key === 'dueDate' && typeof value === 'string'
+            ? new Date(value)
+            : value
+        }
+      }
+    }
+
+    if (Object.keys(allowedData).length === 0) {
+      return NextResponse.json(
+        {
+          error: {
+            code: ERROR_CODES.AUTH_003.code,
+            message: 'Permissão insuficiente: nenhum campo permitido para seu papel.',
+          },
+        },
+        { status: 403 },
+      )
+    }
+
+    const prevStatus = task.status
+
+    const updated = await prisma.task.update({
+      where: { id: taskId },
+      data:  allowedData,
+      include: { assignee: { select: ASSIGNEE_SELECT } },
+    })
+
+    // Eventos
+    await EventBus.publish(
+      EventType.TASK_UPDATED,
+      projectId,
+      { taskId: updated.id, updatedBy: user.id, changes: allowedData },
+      'module-9-scopeshield-board',
+    )
+
+    if (allowedData.status && allowedData.status !== prevStatus) {
+      await EventBus.publish(
+        EventType.TASK_STATUS_CHANGED,
+        projectId,
+        { taskId: updated.id, from: String(prevStatus), to: String(allowedData.status), changedBy: user.id },
+        'module-9-scopeshield-board',
+      )
+    }
+
+    return NextResponse.json(updated)
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[PATCH /tasks/:id]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── DELETE /api/projects/[id]/tasks/[taskId] ────────────────────────────────
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string; taskId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, taskId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  if (!([UserRole.SOCIO as string, UserRole.PM as string]).includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Apenas PM ou Sócio podem excluir tasks.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const task = await prisma.task.findUnique({
+      where: { id: taskId, projectId },
+    })
+
+    if (!task) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.TASK_080.code, message: ERROR_CODES.TASK_080.message } },
+        { status: 404 },
+      )
+    }
+
+    await prisma.task.delete({ where: { id: taskId } })
+
+    return new NextResponse(null, { status: 204 })
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[DELETE /tasks/:id]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

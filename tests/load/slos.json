@@ -1,0 +1,59 @@
+{
+  "_comment": "SLOs extraídos dos RNFs do PRD.md — seção 'Performance'. SLO-SPEC.md não disponível.",
+  "_source": "PRD.md § Requisitos Não Funcionais > Performance",
+  "_generated": "2026-03-23",
+  "global": {
+    "error_rate_max": 0.01,
+    "http_failure_rate_max": 0.05
+  },
+  "scenarios": {
+    "health-check": {
+      "description": "Endpoint de saúde — GET /api/health",
+      "p95_ms": 200,
+      "p99_ms": 500,
+      "error_rate_max": 0.01
+    },
+    "auth-me": {
+      "description": "Sessão autenticada — GET /api/auth/me",
+      "p95_ms": 500,
+      "p99_ms": 1000,
+      "error_rate_max": 0.01
+    },
+    "projects-list": {
+      "description": "Listagem de projetos — GET /api/projects",
+      "p95_ms": 500,
+      "p99_ms": 1000,
+      "error_rate_max": 0.01
+    },
+    "project-tasks": {
+      "description": "Tasks do Kanban — GET /api/projects/:id/tasks",
+      "p95_ms": 500,
+      "p99_ms": 1000,
+      "error_rate_max": 0.01
+    },
+    "create-task": {
+      "description": "Criar task — POST /api/projects/:id/tasks",
+      "p95_ms": 800,
+      "p99_ms": 2000,
+      "error_rate_max": 0.01
+    },
+    "notifications": {
+      "description": "Listagem de notificações — GET /api/notifications",
+      "p95_ms": 500,
+      "p99_ms": 1000,
+      "error_rate_max": 0.01
+    },
+    "pl-preview": {
+      "description": "Preview P&L RentabilIA — GET /api/projects/:id/pl-preview (operação pesada)",
+      "p95_ms": 2000,
+      "p99_ms": 5000,
+      "error_rate_max": 0.05
+    },
+    "rag-query": {
+      "description": "Busca vetorial HandoffAI — POST /api/projects/:id/rag/query",
+      "p95_ms": 3000,
+      "p99_ms": 8000,
+      "error_rate_max": 0.05
+    }
+  }
+}

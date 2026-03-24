@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { createHmac, timingSafeEqual } from 'crypto'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/webhooks/github')
 
 /**
  * POST /api/webhooks/github/{projectId}
@@ -24,7 +27,7 @@ export async function POST(
 
     const webhookSecret = process.env.GITHUB_WEBHOOK_SECRET
     if (!webhookSecret) {
-      console.error('[GitHub Webhook] GITHUB_WEBHOOK_SECRET not configured')
+      log.error('[GitHub Webhook] GITHUB_WEBHOOK_SECRET not configured')
       return NextResponse.json({ error: 'Webhook not configured' }, { status: 500 })
     }
 
@@ -42,13 +45,42 @@ export async function POST(
     const { getPrismaClient } = await import('@/lib/db')
     const prisma = getPrismaClient()
 
-    // 2. Verificar projeto existe e pertence a alguma org
+    // 2a. Verificar payload timestamp para prevenir replay attack (BE-08)
+    // GitHub não envia header de timestamp — verificamos o campo `created_at` do payload
+    // para limitar janela de replay a 5 minutos. O delivery ID abaixo previne duplicatas.
+    let parsedPayload: Record<string, unknown>
+    try {
+      parsedPayload = JSON.parse(rawBody) as Record<string, unknown>
+    } catch {
+      return NextResponse.json({ error: 'Invalid payload' }, { status: 400 })
+    }
+    const payloadTimestamp = typeof parsedPayload.created_at === 'string'
+      ? new Date(parsedPayload.created_at).getTime()
+      : null
+    if (payloadTimestamp !== null && !isNaN(payloadTimestamp)) {
+      const ageSec = (Date.now() - payloadTimestamp) / 1000
+      if (ageSec > 300) {
+        log.warn('[GitHub Webhook] Rejecting stale payload (age: %ds)', Math.round(ageSec))
+        return NextResponse.json({ error: 'Payload too old (replay prevention)' }, { status: 401 })
+      }
+    }
+
+    // 2b. Verificar replay: rejeitar delivery IDs já processados (anti-replay)
+    const existingEvent = await prisma.event.findFirst({
+      where: { correlationId: delivery },
+      select: { id: true },
+    })
+    if (existingEvent) {
+      return NextResponse.json({ received: true, eventType: 'duplicate', skipped: true })
+    }
+
+    // 2b. Verificar projeto existe e pertence a alguma org
     const project = await prisma.project.findUnique({ where: { id: projectId } })
     if (!project) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     }
 
-    const payload = JSON.parse(rawBody) as Record<string, unknown>
+    const payload = parsedPayload
     const eventType = request.headers.get('x-github-event') ?? 'push'
 
     // 3. Registrar evento no bus
@@ -76,7 +108,7 @@ export async function POST(
 
     return NextResponse.json({ received: true, eventType })
   } catch (error) {
-    console.error('[GitHub Webhook] Error:', error)
+    log.error({ err: error }, '[GitHub Webhook] Error:')
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

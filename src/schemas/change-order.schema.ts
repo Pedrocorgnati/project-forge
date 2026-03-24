@@ -1,20 +1,12 @@
-import { z } from 'zod'
-import { AlertTier } from '@prisma/client'
+// ─── CHANGE ORDER SCHEMAS (legacy shim) ───────────────────────────────────────
+// GAP-018: CreateChangeOrderSchema e CreateChangeOrderInput migrados para
+// '@/lib/schemas/change-order'. Este arquivo mantém apenas ListChangeOrdersSchema
+// que ainda não existe na lib canônica.
+// TODO: mover ListChangeOrdersSchema para lib e remover este arquivo.
 
-export const CreateChangeOrderSchema = z.object({
-  projectId: z.string().uuid(),
-  title: z.string().min(1).max(255),
-  description: z.string().min(10).max(5000),
-  impactTier: z.nativeEnum(AlertTier),
-  hoursImpact: z.number().nonnegative(),
-  costImpact: z.number().nonnegative(),
-  scopeImpact: z.string().min(1),
-  taskIds: z.array(z.string().uuid()).optional(),
-})
+import { z } from 'zod'
 
 export const ListChangeOrdersSchema = z.object({
   projectId: z.string().uuid(),
-  status: z.enum(['DRAFT', 'SENT', 'APPROVED', 'REJECTED', 'EXPIRED']).optional(),
+  status: z.enum(['DRAFT', 'PENDING_APPROVAL', 'APPROVED', 'REJECTED']).optional(),
 })
-
-export type CreateChangeOrderInput = z.infer<typeof CreateChangeOrderSchema>

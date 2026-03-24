@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import { Inter } from 'next/font/google'
+import { Analytics } from '@vercel/analytics/react'
+import { SpeedInsights } from '@vercel/speed-insights/next'
 import { Providers } from '@/components/providers'
 import { DevOverlayWrapper } from '@/components/dev/DevOverlayWrapper'
 import './globals.css'
@@ -7,6 +9,7 @@ import './globals.css'
 const inter = Inter({
   subsets: ['latin'],
   variable: '--font-inter',
+  display: 'swap',
 })
 
 export const viewport: Viewport = {
@@ -21,18 +24,12 @@ export const metadata: Metadata = {
   },
   description: 'Plataforma PSA para software houses — gerencie projetos, equipes e rentabilidade.',
   icons: {
-    // @ASSET_PLACEHOLDER
-    // name: favicon
-    // type: image
-    // extension: ico
-    // format: 1:1
-    // dimensions: 32x32
-    // description: Favicon do ProjectForge. Ícone geométrico minimalista com iniciais PF estilizadas.
-    // context: Browser tab, bookmarks
-    // style: Minimalista, monocromático
-    // colors: primary (#6366f1)
-    icon: '/favicon.ico',
-    apple: '/apple-icon.png',
+    icon: [
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+      { url: '/favicon.ico', sizes: '32x32' },
+    ],
+    // apple-icon.png will be added once final brand assets are generated
+    // apple: '/apple-icon.png',
   },
 }
 
@@ -41,6 +38,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="pt-BR" className={`${inter.variable} h-full antialiased`} suppressHydrationWarning>
       <body className="min-h-full flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-50">
         <Providers>{children}</Providers>
+        <Analytics />
+        <SpeedInsights />
         <DevOverlayWrapper />
       </body>
     </html>

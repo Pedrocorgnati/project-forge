@@ -1,0 +1,37 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "installCommand": "npm ci",
+  "regions": ["gru1"],
+  "github": {
+    "autoAlias": true,
+    "enabled": true
+  },
+  "crons": [
+    {
+      "path": "/api/scheduler",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/sla-enforcer",
+      "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/cron/checkpoint-service",
+      "schedule": "0 6 * * *"
+    },
+    {
+      "path": "/api/cron/retry-failed-embeddings",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/recalculate-project-metrics",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/cron/notification-dispatcher",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}

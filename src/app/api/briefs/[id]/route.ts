@@ -1,0 +1,129 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { BriefService, BriefNotFoundError } from '@/lib/briefforge/brief-service'
+import { prisma } from '@/lib/db'
+import { AppError } from '@/lib/errors'
+import { UserRole } from '@prisma/client'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/briefs/id')
+
+// ─── GET /api/briefs/[id] — Leitura ──────────────────────────────────────────
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    const { id } = await params
+    const brief = await BriefService.findById(id, { includeLastSession: true })
+
+    // Verify project access — any member role
+    const projectRecord = await prisma.brief.findUnique({
+      where: { id },
+      select: { projectId: true },
+    })
+    if (!projectRecord) throw new BriefNotFoundError()
+    await withProjectAccess(user.id, projectRecord.projectId)
+
+    return NextResponse.json({ data: brief })
+  } catch (err) {
+    if (err instanceof BriefNotFoundError || (err instanceof AppError && err.statusCode === 404)) {
+      return NextResponse.json(
+        { error: { code: 'BRIEF_080', message: 'Brief não encontrado.' } },
+        { status: 404 },
+      )
+    }
+    if (err instanceof AppError) {
+      return NextResponse.json(
+        { error: { code: err.code, message: err.message } },
+        { status: err.statusCode },
+      )
+    }
+    log.error({ err }, '[GET /api/briefs/[id]]')
+    return NextResponse.json(
+      { error: { code: 'SYS_500', message: 'Erro interno. Tente novamente.' } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── PATCH /api/briefs/[id] — Atualização ────────────────────────────────────
+
+const UpdateBriefSchema = z.object({
+  aiMetadata: z.record(z.string(), z.unknown()).optional(),
+})
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json(
+      { error: { code: 'VAL_001', message: 'Payload JSON inválido.' } },
+      { status: 422 },
+    )
+  }
+
+  const parsed = UpdateBriefSchema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json(
+      { error: { code: 'VAL_001', message: 'Dados inválidos.', details: parsed.error.flatten() } },
+      { status: 422 },
+    )
+  }
+
+  try {
+    const { id } = await params
+    const projectRecord = await prisma.brief.findUnique({
+      where: { id },
+      select: { projectId: true },
+    })
+    if (!projectRecord) throw new BriefNotFoundError()
+
+    // Requires PM or higher
+    await withProjectAccess(user.id, projectRecord.projectId, UserRole.PM)
+
+    const updated = await BriefService.update(id, { aiMetadata: parsed.data.aiMetadata })
+    return NextResponse.json({ data: updated })
+  } catch (err) {
+    if (err instanceof BriefNotFoundError || (err instanceof AppError && err.statusCode === 404)) {
+      return NextResponse.json(
+        { error: { code: 'BRIEF_080', message: 'Brief não encontrado.' } },
+        { status: 404 },
+      )
+    }
+    if (err instanceof AppError) {
+      return NextResponse.json(
+        { error: { code: err.code, message: err.message } },
+        { status: err.statusCode },
+      )
+    }
+    log.error({ err }, '[PATCH /api/briefs/[id]]')
+    return NextResponse.json(
+      { error: { code: 'SYS_500', message: 'Erro interno. Tente novamente.' } },
+      { status: 500 },
+    )
+  }
+}

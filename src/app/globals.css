@@ -19,6 +19,22 @@
   --color-info: #3b82f6;
   --spacing-sidebar: 240px;
   --spacing-header: 64px;
+
+  /* EstimaAI — confidence levels */
+  --confidence-high:   hsl(142 76% 36%);
+  --confidence-medium: hsl(38 92% 50%);
+  --confidence-low:    hsl(0 84% 60%);
+
+  /* EstimaAI — range display */
+  --range-bar-bg:      hsl(215 28% 17%);
+  --range-bar-fill:    hsl(221 83% 53%);
+  --range-midpoint:    hsl(221 83% 70%);
+
+  /* Border radius tokens */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
 }
 
 .dark {
@@ -50,7 +66,28 @@
   --color-warning: var(--color-warning);
   --color-error: var(--color-error);
   --color-info: var(--color-info);
-  --font-sans: Inter, ui-sans-serif, system-ui, sans-serif;
+  /* Surface & text tokens — usáveis como classes Tailwind (bg-bg-primary, text-text-muted, etc.) */
+  --color-bg-primary: var(--color-bg-primary);
+  --color-bg-secondary: var(--color-bg-secondary);
+  --color-bg-tertiary: var(--color-bg-tertiary);
+  --color-text-primary: var(--color-text-primary);
+  --color-text-secondary: var(--color-text-secondary);
+  --color-text-muted: var(--color-text-muted);
+  --color-border: var(--color-border);
+  /* Confidence tokens (EstimaAI) */
+  --color-confidence-high: var(--confidence-high);
+  --color-confidence-medium: var(--confidence-medium);
+  --color-confidence-low: var(--confidence-low);
+  /* Layout spacing tokens */
+  --spacing-sidebar: var(--spacing-sidebar);
+  --spacing-header: var(--spacing-header);
+  /* Border radius tokens */
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  /* T002: font via Next.js font variable (preload/swap ativado pelo Inter({variable})) */
+  --font-sans: var(--font-inter, Inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 }
 

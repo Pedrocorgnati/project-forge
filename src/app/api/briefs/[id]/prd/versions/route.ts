@@ -1,0 +1,62 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { AppError } from '@/lib/errors'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { UserRole } from '@prisma/client'
+import { DocumentService } from '@/lib/briefforge/document-service'
+import { prisma } from '@/lib/db'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/briefs/prd-versions')
+
+// ─── GET /api/briefs/[id]/prd/versions — Histórico completo de versões ─────────
+// Acesso restrito: apenas PM e SOCIO
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    // Buscar brief para obter projectId
+    const { id } = await params
+    const brief = await prisma.brief.findUnique({
+      where: { id },
+      select: { id: true, projectId: true },
+    })
+
+    if (!brief) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.BRIEF_080.code, message: ERROR_CODES.BRIEF_080.message } },
+        { status: 404 },
+      )
+    }
+
+    // RBAC: apenas PM e SOCIO podem ver histórico de versões
+    await withProjectAccess(user.id, brief.projectId, UserRole.PM)
+
+    const versions = await DocumentService.listVersions(brief.id)
+
+    return NextResponse.json({ data: versions })
+  } catch (err) {
+    if (err instanceof AppError) {
+      return NextResponse.json(
+        { error: { code: err.code, message: err.message } },
+        { status: err.statusCode },
+      )
+    }
+    log.error({ err }, '[GET /api/briefs/[id]/prd/versions]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

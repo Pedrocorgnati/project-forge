@@ -1,9 +1,10 @@
 'use client'
 
 import { useEffect } from 'react'
+import * as Sentry from '@sentry/nextjs'
 import { Button } from '@/components/ui/button'
 
-export default function GlobalError({
+export default function RootError({
   error,
   reset,
 }: {
@@ -11,7 +12,7 @@ export default function GlobalError({
   reset: () => void
 }) {
   useEffect(() => {
-    console.error(error)
+    Sentry.captureException(error)
   }, [error])
 
   return (
@@ -24,6 +25,9 @@ export default function GlobalError({
         <p className="text-slate-500 dark:text-slate-400">
           Ocorreu um erro inesperado. Nossa equipe foi notificada.
         </p>
+        {error.digest && (
+          <p className="font-mono text-xs text-slate-400">Código: {error.digest}</p>
+        )}
         <Button variant="primary" onClick={reset}>
           Tentar novamente
         </Button>

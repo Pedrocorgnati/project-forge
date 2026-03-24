@@ -1,0 +1,66 @@
+// src/app/api/projects/[id]/scope-baseline/[baselineId]/route.ts
+// GET — retorna baseline individual com snapshot (module-9-scopeshield-board)
+// Rastreabilidade INTAKE: INT-060
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { AppError } from '@/lib/errors'
+import { createLogger } from '@/lib/logger'
+import { UserRole } from '@prisma/client'
+
+const log = createLogger('api/scope-baseline/id')
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string; baselineId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, baselineId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  // CLIENTE não pode ver baselines
+  if (user.role === UserRole.CLIENTE) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Acesso restrito.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const baseline = await prisma.scopeBaseline.findUnique({
+      where: { id: baselineId, projectId },
+    })
+
+    if (!baseline) {
+      return NextResponse.json(
+        { error: { code: 'BASELINE_001', message: 'Baseline não encontrado.' } },
+        { status: 404 },
+      )
+    }
+
+    return NextResponse.json(baseline)
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[GET /scope-baseline/:id]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

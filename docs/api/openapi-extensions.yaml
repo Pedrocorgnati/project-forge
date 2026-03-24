@@ -1,0 +1,106 @@
+# OpenAPI Extension — Health Check Endpoint
+# Adicionar ao openapi.yaml principal do ProjectForge
+
+paths:
+  /api/healthz:
+    get:
+      operationId: getHealthCheck
+      summary: Health check do sistema
+      description: |
+        Verifica o estado de saúde do sistema, incluindo conectividade com o banco de dados.
+        Retorna 200 quando saudável, 503 quando degradado.
+        Não deve ser cacheado (Cache-Control: no-store).
+      tags:
+        - System
+      security: []  # Endpoint público — sem autenticação
+      responses:
+        '200':
+          description: Sistema saudável
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store, no-cache, must-revalidate
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckOk'
+              example:
+                status: ok
+                version: "0.1.0"
+                timestamp: "2026-03-22T10:30:00.000Z"
+                env: production
+                db: connected
+                responseTime: "12ms"
+        '503':
+          description: Sistema degradado (banco de dados inacessível)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckDegraded'
+              example:
+                status: degraded
+                version: "0.1.0"
+                timestamp: "2026-03-22T10:30:00.000Z"
+                env: production
+                db: disconnected
+                responseTime: "30001ms"
+                dbError: "Connection timeout"
+
+components:
+  schemas:
+    HealthCheckOk:
+      type: object
+      required: [status, version, timestamp, env, db, responseTime]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+          description: Estado geral do serviço
+        version:
+          type: string
+          description: Versão do pacote npm (npm_package_version) ou "0.0.0"
+          example: "0.1.0"
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento da verificação em ISO-8601
+        env:
+          type: string
+          description: NODE_ENV do servidor
+          example: production
+        db:
+          type: string
+          enum: [connected]
+          description: Estado da conexão com o banco de dados
+        responseTime:
+          type: string
+          description: Tempo de resposta da probe completa
+          example: "12ms"
+
+    HealthCheckDegraded:
+      type: object
+      required: [status, version, timestamp, env, db, responseTime]
+      properties:
+        status:
+          type: string
+          enum: [degraded]
+        version:
+          type: string
+          example: "0.1.0"
+        timestamp:
+          type: string
+          format: date-time
+        env:
+          type: string
+          example: production
+        db:
+          type: string
+          enum: [disconnected]
+        responseTime:
+          type: string
+          example: "30001ms"
+        dbError:
+          type: string
+          description: Mensagem de erro da conexão com o banco
+          example: "Connection timeout"

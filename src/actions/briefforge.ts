@@ -1,23 +1,23 @@
 'use server'
 
 import { prisma } from '@/lib/db'
-import { getAuthUser } from '@/lib/auth'
+import { requireServerUser } from '@/lib/auth/get-user'
 import { withProjectAccess } from '@/lib/rbac'
 import { toActionError, AppError } from '@/lib/errors'
 import { ERROR_CODES } from '@/lib/constants/errors'
+import { BriefService } from '@/lib/briefforge/brief-service'
+import { BriefStatus } from '@/types/briefforge'
 import { z } from 'zod'
 import { revalidatePath } from 'next/cache'
 import type { Prisma } from '@prisma/client'
 
-const UpdateBriefSchema = z.object({
-  answers: z.record(z.string(), z.unknown()).optional(),
-  aiContext: z.record(z.string(), z.unknown()).optional(),
-  isComplete: z.boolean().optional(),
+const UpdateBriefMetadataSchema = z.object({
+  aiMetadata: z.record(z.string(), z.unknown()).optional(),
 })
 
 export async function getBrief(briefId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
 
     const brief = await prisma.brief.findUnique({
       where: { id: briefId },
@@ -35,10 +35,32 @@ export async function getBrief(briefId: string) {
   }
 }
 
-export async function updateBrief(briefId: string, input: unknown) {
+export async function getBriefByProject(projectId: string) {
   try {
-    const user = await getAuthUser()
-    const validated = UpdateBriefSchema.parse(input)
+    const user = await requireServerUser()
+    await withProjectAccess(user.id, projectId)
+
+    const brief = await prisma.brief.findUnique({
+      where: { projectId },
+      include: {
+        sessions: {
+          orderBy: { startedAt: 'desc' },
+          take: 1,
+          include: { questions: { orderBy: { order: 'asc' } } },
+        },
+      },
+    })
+
+    return { data: brief }
+  } catch (error) {
+    return toActionError(error)
+  }
+}
+
+export async function updateBriefMetadata(briefId: string, input: unknown) {
+  try {
+    const user = await requireServerUser()
+    const validated = UpdateBriefMetadataSchema.parse(input)
 
     const brief = await prisma.brief.findUnique({
       where: { id: briefId },
@@ -54,9 +76,9 @@ export async function updateBrief(briefId: string, input: unknown) {
     const data = await prisma.brief.update({
       where: { id: briefId },
       data: {
-        ...(validated.answers ? { answers: validated.answers as Prisma.InputJsonValue } : {}),
-        ...(validated.aiContext ? { aiContext: validated.aiContext as Prisma.InputJsonValue } : {}),
-        ...(validated.isComplete !== undefined ? { isComplete: validated.isComplete } : {}),
+        ...(validated.aiMetadata !== undefined
+          ? { aiMetadata: validated.aiMetadata as Prisma.InputJsonValue }
+          : {}),
       },
     })
 
@@ -67,16 +89,51 @@ export async function updateBrief(briefId: string, input: unknown) {
   }
 }
 
-export async function startBriefSession(projectId: string) {
-  // TODO: Implementar via /auto-flow execute - integração Claude CLI
+export async function createBriefForProject(projectId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     await withProjectAccess(user.id, projectId)
 
-    // Garante que o brief existe para o projeto
+    const existing = await prisma.brief.findUnique({ where: { projectId } })
+    if (existing) {
+      return { data: existing }
+    }
+
+    const brief = await BriefService.create({ projectId })
+    revalidatePath(`/briefforge/${projectId}`)
+    return { data: brief }
+  } catch (error) {
+    return toActionError(error)
+  }
+}
+
+export async function isBriefCompleted(briefId: string) {
+  try {
+    const user = await requireServerUser()
+
+    const brief = await prisma.brief.findUnique({
+      where: { id: briefId },
+      include: { project: { select: { id: true } } },
+    })
+
+    if (!brief) throw new AppError(ERROR_CODES.BRIEF_080.code, ERROR_CODES.BRIEF_080.message, 404)
+    await withProjectAccess(user.id, brief.project.id)
+
+    return { data: { completed: brief.status === BriefStatus.COMPLETED } }
+  } catch (error) {
+    return toActionError(error)
+  }
+}
+
+/** @deprecated Use POST /api/briefs/[id]/sessions instead */
+export async function startBriefSession(projectId: string) {
+  try {
+    const user = await requireServerUser()
+    await withProjectAccess(user.id, projectId)
+
     const brief = await prisma.brief.upsert({
       where: { projectId },
-      create: { projectId, answers: {}, aiContext: {} },
+      create: { projectId, status: BriefStatus.DRAFT },
       update: {},
     })
 
@@ -86,14 +143,14 @@ export async function startBriefSession(projectId: string) {
   }
 }
 
+/** @deprecated Use POST /api/briefs/[id]/sessions/[sessionId]/questions instead */
 export async function answerBriefQuestion(briefId: string, answer: string) {
-  // TODO: Implementar via /auto-flow execute - streaming Claude CLI
   void briefId; void answer
-  throw new Error('Not implemented - run /auto-flow execute')
+  throw new Error('Use POST /api/briefs/[id]/sessions/[sessionId]/questions para streaming SSE')
 }
 
+/** @deprecated Use module-6 PRD generation endpoint */
 export async function generatePRD(briefId: string) {
-  // TODO: Implementar via /auto-flow execute - gerar PRD via Claude CLI
   void briefId
-  throw new Error('Not implemented - run /auto-flow execute')
+  throw new Error('Use module-6 PRD generation endpoint')
 }

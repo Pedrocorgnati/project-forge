@@ -1,14 +1,17 @@
 'use server'
 
 import { prisma } from '@/lib/db'
-import { getAuthUser } from '@/lib/auth'
+import { requireServerUser } from '@/lib/auth/get-user'
 import { withProjectAccess } from '@/lib/rbac'
 import { toActionError, AppError } from '@/lib/errors'
 import { ERROR_CODES } from '@/lib/constants/errors'
+import { EventBusClient } from '@/lib/events/event-bus-client'
+import { EventType } from '@/lib/constants/events'
 import { CreateTaskSchema, UpdateTaskSchema, RegisterScopeValidationSchema, ListTasksSchema } from '@/schemas/task.schema'
-import { CreateChangeOrderSchema, ListChangeOrdersSchema } from '@/schemas/change-order.schema'
+import { CreateChangeOrderSchema } from '@/lib/schemas/change-order'
+import { ListChangeOrdersSchema } from '@/schemas/change-order.schema'
 import type { CreateTaskInput, UpdateTaskInput, RegisterScopeValidationInput } from '@/schemas/task.schema'
-import type { CreateChangeOrderInput } from '@/schemas/change-order.schema'
+import type { CreateChangeOrderInput } from '@/lib/schemas/change-order'
 import { UserRole } from '@prisma/client'
 import { revalidatePath } from 'next/cache'
 
@@ -18,7 +21,7 @@ import { revalidatePath } from 'next/cache'
 
 export async function getTasks(params: { projectId: string; status?: string; assigneeId?: string }) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const input = ListTasksSchema.parse(params)
     await withProjectAccess(user.id, input.projectId)
 
@@ -44,18 +47,25 @@ export async function getTasks(params: { projectId: string; status?: string; ass
 
 export async function createTask(input: CreateTaskInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const validated = CreateTaskSchema.parse(input)
     await withProjectAccess(user.id, validated.projectId, UserRole.DEV)
 
     const data = await prisma.task.create({
       data: {
         ...validated,
-        // Emitir evento TASK_CREATED
+        createdBy: user.id,
       },
     })
 
-    // TODO: Emitir evento TASK_CREATED via /auto-flow execute
+    // RESOLVED: DEBT-005
+    try {
+      await EventBusClient.publish(EventType.TASK_CREATED, validated.projectId, {
+        taskId: data.id,
+        createdBy: user.id,
+      })
+    } catch { /* evento não bloqueia fluxo principal */ }
+
     revalidatePath('/board')
     revalidatePath('/scopeshield')
     return { data }
@@ -66,7 +76,7 @@ export async function createTask(input: CreateTaskInput) {
 
 export async function updateTask(taskId: string, input: UpdateTaskInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const validated = UpdateTaskSchema.parse(input)
 
     const task = await prisma.task.findUnique({ where: { id: taskId } })
@@ -94,7 +104,7 @@ export async function updateTask(taskId: string, input: UpdateTaskInput) {
 
 export async function getTaskScope(taskId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
 
     const task = await prisma.task.findUnique({ where: { id: taskId } })
     if (!task) throw new AppError(ERROR_CODES.TASK_080.code, ERROR_CODES.TASK_080.message, 404)
@@ -110,7 +120,7 @@ export async function getTaskScope(taskId: string) {
 
 export async function registerScopeValidation(taskId: string, input: RegisterScopeValidationInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const validated = RegisterScopeValidationSchema.parse(input)
 
     const task = await prisma.task.findUnique({ where: { id: taskId } })
@@ -130,7 +140,16 @@ export async function registerScopeValidation(taskId: string, input: RegisterSco
       data: { scopeStatus: validated.result },
     })
 
-    // TODO: Emitir evento SCOPE_ALERT se INVALID via /auto-flow execute
+    // RESOLVED: DEBT-005
+    if (validated.result === 'INVALID') {
+      try {
+        await EventBusClient.publish(EventType.SCOPE_ALERT_TRIGGERED, task.projectId, {
+          projectId: task.projectId,
+          deviation: Number(validated.similarityScore),
+          taskId,
+        })
+      } catch { /* evento não bloqueia fluxo principal */ }
+    }
 
     revalidatePath('/scopeshield')
     return { data }
@@ -143,10 +162,54 @@ export async function updateTaskStatus(taskId: string, status: string) {
   return updateTask(taskId, { status: status as never })
 }
 
+// RESOLVED: DEBT-004
 export async function detectScopeDeviation(taskId: string) {
-  // TODO: Implementar via /auto-flow execute - comparar horas estimadas vs realizadas
-  void taskId
-  return { data: null }
+  try {
+    const user = await requireServerUser()
+
+    const task = await prisma.task.findUnique({ where: { id: taskId } })
+    if (!task) throw new AppError(ERROR_CODES.TASK_080.code, ERROR_CODES.TASK_080.message, 404)
+
+    await withProjectAccess(user.id, task.projectId)
+
+    const estimatedHours = Number(task.estimatedHours ?? 0)
+
+    // Agregar horas reais dos timesheets vinculados a esta task
+    const aggregate = await prisma.timesheetEntry.aggregate({
+      where: { taskId, deletedAt: null },
+      _sum: { hours: true },
+    })
+    const actualHours = Number(aggregate._sum.hours ?? 0)
+
+    // Calcular desvio percentual
+    const deviationPercent =
+      estimatedHours > 0
+        ? ((actualHours - estimatedHours) / estimatedHours) * 100
+        : actualHours > 0
+          ? 100
+          : 0
+
+    // Classificar status baseado nos thresholds
+    const absDeviation = Math.abs(deviationPercent)
+    const status: 'ON_TRACK' | 'WARNING' | 'OVER_SCOPE' =
+      absDeviation < 10
+        ? 'ON_TRACK'
+        : absDeviation <= 25
+          ? 'WARNING'
+          : 'OVER_SCOPE'
+
+    return {
+      data: {
+        taskId,
+        estimatedHours,
+        actualHours,
+        deviationPercent: Math.round(deviationPercent * 100) / 100,
+        status,
+      },
+    }
+  } catch (error) {
+    return toActionError(error)
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -155,7 +218,7 @@ export async function detectScopeDeviation(taskId: string) {
 
 export async function getChangeOrders(params: { projectId: string; status?: string }) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const input = ListChangeOrdersSchema.parse(params)
     await withProjectAccess(user.id, input.projectId)
 
@@ -179,11 +242,11 @@ export async function getChangeOrders(params: { projectId: string; status?: stri
 
 export async function createChangeOrder(input: CreateChangeOrderInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const validated = CreateChangeOrderSchema.parse(input)
     await withProjectAccess(user.id, validated.projectId, UserRole.PM)
 
-    const { taskIds, ...changeOrderData } = validated
+    const { affectedTaskIds: taskIds, ...changeOrderData } = validated
 
     const data = await prisma.changeOrder.create({
       data: {
@@ -199,7 +262,15 @@ export async function createChangeOrder(input: CreateChangeOrderInput) {
       },
     })
 
-    // TODO: Emitir CHANGE_ORDER_CREATED via /auto-flow execute
+    // RESOLVED: DEBT-005
+    try {
+      await EventBusClient.publish(EventType.CHANGE_ORDER_CREATED, validated.projectId, {
+        projectId: validated.projectId,
+        changeOrderId: data.id,
+        impactBRL: Number(changeOrderData.impactHours ?? 0),
+      })
+    } catch { /* evento não bloqueia fluxo principal */ }
+
     revalidatePath('/scopeshield')
     return { data }
   } catch (error) {

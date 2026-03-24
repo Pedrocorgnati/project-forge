@@ -18,11 +18,13 @@ env:
   NEXT_PUBLIC_SITE_URL: http://localhost:3000
   DATABASE_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
   DIRECT_URL: postgresql://placeholder:placeholder@localhost:5432/placeholder
+  GITHUB_WEBHOOK_SECRET: ci-placeholder-webhook-secret-32chars
 
 jobs:
   lint-and-typecheck:
     name: Lint & Type Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -41,15 +43,55 @@ jobs:
         run: npx prisma generate
 
       - name: Run ESLint
-        run: npm run lint
+        run: npm run lint -- --max-warnings 0
 
       - name: Run TypeScript check
         run: npx tsc --noEmit
+
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    needs: lint-and-typecheck
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Run tests
+        run: npm run test:ci
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL_TEST || env.DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.DATABASE_URL_TEST || env.DIRECT_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL_TEST || env.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY_TEST || env.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SITE_URL: ${{ env.NEXT_PUBLIC_SITE_URL }}
+          GITHUB_WEBHOOK_SECRET: ${{ env.GITHUB_WEBHOOK_SECRET }}
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
 
   build:
     name: Build
     runs-on: ubuntu-latest
     needs: lint-and-typecheck
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -69,6 +111,11 @@ jobs:
 
       - name: Build Next.js
         run: npm run build
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
 
       - name: Verify standalone output
         run: |
@@ -78,10 +125,30 @@ jobs:
           fi
           echo "Standalone output: OK"
 
+      - name: Check bundle size
+        run: |
+          if [ -f "scripts/check-bundle-size.js" ]; then
+            node scripts/check-bundle-size.js
+          else
+            echo "check-bundle-size.js not found — skipping"
+          fi
+
+      - name: Create Sentry release
+        uses: getsentry/action-release@v1
+        if: github.ref == 'refs/heads/main' && secrets.SENTRY_AUTH_TOKEN != ''
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        with:
+          environment: production
+          version: ${{ github.sha }}
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     needs: lint-and-typecheck
+    timeout-minutes: 20
 
     steps:
       - name: Checkout

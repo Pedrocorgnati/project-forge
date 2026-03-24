@@ -80,7 +80,7 @@ export function LoadingSpinner({ size = 'md', centered = false, label = 'Carrega
     <div role="status" aria-label={label}>
       <svg
         aria-hidden="true"
-        className={cn(spinnerSizes[size], 'border-2 border-current border-t-transparent rounded-full animate-spin text-indigo-500')}
+        className={cn(spinnerSizes[size], 'border-2 border-current border-t-transparent rounded-full animate-spin text-brand')}
         viewBox="0 0 24 24"
         fill="none"
       />

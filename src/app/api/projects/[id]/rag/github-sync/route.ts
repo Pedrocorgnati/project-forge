@@ -1,0 +1,143 @@
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { UserRole } from '@prisma/client'
+import { githubSyncSchema } from '@/lib/schemas/rag'
+import { GitHubFetcher } from '@/lib/rag/github-fetcher'
+import { EventBus } from '@/lib/events'
+import { EventType } from '@/lib/constants/events'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/rag/github-sync')
+
+// ─── POST /api/projects/[id]/rag/github-sync ────────────────────────────────
+// Configura sync do GitHub e dispara sincronização assíncrona
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: 'AUTH_001', message: 'Não autenticado.' } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId, UserRole.PM)
+
+    const body = await req.json()
+    const { repoUrl, branch } = githubSyncSchema.parse(body)
+
+    // Extrair owner/repo da URL
+    const match = repoUrl.match(/github\.com\/([\w.-]+)\/([\w.-]+?)(?:\.git)?$/)
+    if (!match) {
+      return NextResponse.json(
+        { error: { code: 'HANDOFF_020', message: 'URL do repositório inválida.' } },
+        { status: 400 },
+      )
+    }
+    const [, repoOwner, repoName] = match
+
+    // Verificar se já existe indexação em andamento
+    const existingIndex = await prisma.rAGIndex.findUnique({ where: { projectId } })
+    if (existingIndex?.indexationStatus === 'IN_PROGRESS') {
+      return NextResponse.json(
+        { error: { code: 'HANDOFF_050', message: 'Indexação já em andamento para este projeto.' } },
+        { status: 422 },
+      )
+    }
+
+    // Upsert GitHubSync
+    const sync = await prisma.gitHubSync.upsert({
+      where: { projectId },
+      create: {
+        projectId,
+        installationId: 'manual',
+        repoOwner,
+        repoName,
+        syncStatus: 'SYNCING',
+      },
+      update: {
+        repoOwner,
+        repoName,
+        syncStatus: 'SYNCING',
+      },
+    })
+
+    // Upsert RAGIndex
+    const ragIndex = await prisma.rAGIndex.upsert({
+      where: { projectId },
+      create: {
+        projectId,
+        githubRepoUrl: repoUrl,
+        githubOwner: repoOwner,
+        githubRepo: repoName,
+        indexationStatus: 'IN_PROGRESS',
+      },
+      update: {
+        githubRepoUrl: repoUrl,
+        githubOwner: repoOwner,
+        githubRepo: repoName,
+        indexationStatus: 'IN_PROGRESS',
+      },
+    })
+
+    // Sync assíncrono
+    void (async () => {
+      try {
+        const result = await GitHubFetcher.syncRepository({
+          ragIndexId: ragIndex.id,
+          repoOwner,
+          repoName,
+          branch,
+          lastCommitSha: ragIndex.lastCommitSha,
+        })
+
+        await prisma.gitHubSync.update({
+          where: { id: sync.id },
+          data: { syncStatus: 'IDLE', lastWebhookAt: new Date() },
+        })
+        await prisma.rAGIndex.update({
+          where: { id: ragIndex.id },
+          data: {
+            indexationStatus: 'COMPLETE',
+            lastIndexedAt: new Date(),
+          },
+        })
+
+        await EventBus.publish(
+          EventType.RAG_INDEX_COMPLETED,
+          projectId,
+          { projectId, chunkCount: result.indexed, indexDurationMs: 0 },
+          'module-12',
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        log.error({ err: msg }, '[GitHubSync] Sync failed:')
+
+        await prisma.gitHubSync.update({
+          where: { id: sync.id },
+          data: { syncStatus: 'ERROR' },
+        })
+        await prisma.rAGIndex.update({
+          where: { id: ragIndex.id },
+          data: { indexationStatus: 'FAILED' },
+        })
+      }
+    })()
+
+    return NextResponse.json(
+      { data: { gitHubSyncId: sync.id, syncStatus: 'SYNCING' } },
+      { status: 202 },
+    )
+  } catch (err) {
+    log.error({ err }, '[GitHubSync] Error:')
+    const message = err instanceof Error ? err.message : 'Erro interno'
+    return NextResponse.json({ error: { code: 'SYS_001', message } }, { status: 500 })
+  }
+}

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -8,6 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { FormField } from '@/components/ui/form-field'
 import { toast } from '@/components/ui/toast'
+import { createClient } from '@/lib/supabase/client'
+import { ROUTES } from '@/lib/constants/routes'
 
 const verifySchema = z.object({
   code: z.string().length(6, 'Código deve ter 6 dígitos').regex(/^\d+$/, 'Apenas números'),
@@ -23,18 +26,41 @@ const ERROR_MESSAGES: Record<number, string> = {
 }
 
 export default function MfaVerifyPage() {
+  const router = useRouter()
   const [attemptsLeft, setAttemptsLeft] = useState(5)
   const [useRecovery, setUseRecovery] = useState(false)
 
-  const { register, handleSubmit, reset, formState: { errors, isSubmitting } } = useForm<VerifyFormData>({
+  const { register, handleSubmit, reset, watch, formState: { errors, isSubmitting } } = useForm<VerifyFormData>({
     resolver: zodResolver(verifySchema),
+    mode: 'onBlur',
   })
 
+  const codeValue = watch('code')
+
   async function onSubmit(data: VerifyFormData) {
+    const supabase = createClient()
+
     try {
-      // TODO: Implementar backend - Supabase MFA challenge verify
-      void data
-      throw new Error('Not implemented - run /auto-flow execute')
+      const { data: factors, error: listError } = await supabase.auth.mfa.listFactors()
+      if (listError) throw listError
+
+      const factor = factors?.totp?.[0]
+      if (!factor) {
+        router.push(ROUTES.MFA_SETUP)
+        return
+      }
+
+      const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId: factor.id })
+      if (challengeError || !challenge) throw challengeError ?? new Error('Challenge failed')
+
+      const { error } = await supabase.auth.mfa.verify({
+        factorId: factor.id,
+        challengeId: challenge.id,
+        code: data.code,
+      })
+      if (error) throw error
+
+      router.push(ROUTES.PORTAL)
     } catch {
       const newAttempts = attemptsLeft - 1
       setAttemptsLeft(newAttempts)
@@ -50,7 +76,7 @@ export default function MfaVerifyPage() {
   return (
     <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
       <div className="px-8 pt-8 pb-6 text-center">
-        <div className="w-12 h-12 bg-indigo-50 dark:bg-indigo-900/30 rounded-full mx-auto mb-4 flex items-center justify-center">
+        <div className="w-12 h-12 bg-brand-light dark:bg-brand/10 rounded-full mx-auto mb-4 flex items-center justify-center">
           <span className="text-2xl" aria-hidden="true">🔐</span>
         </div>
         <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-50 mb-1">
@@ -69,7 +95,7 @@ export default function MfaVerifyPage() {
             <p className="text-sm text-red-600 dark:text-red-400 font-medium">
               {ERROR_MESSAGES[0]}
             </p>
-            <Button variant="secondary" className="w-full" onClick={() => window.location.reload()}>
+            <Button variant="secondary" className="w-full" onClick={() => router.push(ROUTES.LOGIN)}>
               Voltar ao login
             </Button>
           </div>
@@ -88,18 +114,30 @@ export default function MfaVerifyPage() {
                 placeholder={useRecovery ? 'XXXX-XXXX-XXXX' : '000000'}
                 className={!useRecovery ? 'text-center text-xl tracking-widest font-mono' : 'font-mono'}
                 error={errors.code?.message}
-                {...register('code')}
+                {...register('code', {
+                  onChange: (e) => {
+                    if (!useRecovery && e.target.value.length === 6) {
+                      handleSubmit(onSubmit)()
+                    }
+                  },
+                })}
               />
             </FormField>
 
-            <Button type="submit" variant="primary" className="w-full" loading={isSubmitting}>
+            <Button
+              type="submit"
+              variant="primary"
+              className="w-full"
+              loading={isSubmitting}
+              disabled={!useRecovery && codeValue?.length === 6 && isSubmitting}
+            >
               Verificar
             </Button>
 
             <button
               type="button"
-              onClick={() => { setUseRecovery((v) => !v); }}
-              className="w-full text-sm text-indigo-600 dark:text-indigo-400 hover:underline"
+              onClick={() => { setUseRecovery((v) => !v); reset(); }}
+              className="w-full text-sm text-brand dark:text-brand hover:underline"
             >
               {useRecovery ? 'Usar código do autenticador' : 'Usar código de recuperação'}
             </button>

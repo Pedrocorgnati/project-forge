@@ -1,0 +1,117 @@
+// ─── SCOPE ALERT [alertId] ROUTE ──────────────────────────────────────────────
+// module-10-scopeshield-validation / TASK-2 / ST002
+// PATCH /api/projects/[id]/scope-alerts/[alertId] — acknowledge ou dismiss
+// Rastreabilidade: INT-068
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { AlertActionSchema } from '@/lib/schemas/scope-alert'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { UserRole } from '@prisma/client'
+
+const ALLOWED_ROLES = [UserRole.SOCIO as string, UserRole.PM as string]
+
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string; alertId: string }> },
+): Promise<NextResponse> {
+  const { id: projectId, alertId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  if (!ALLOWED_ROLES.includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Apenas PM ou Sócio podem gerenciar alertas de escopo.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const alert = await prisma.scopeAlert.findFirst({
+      where: { id: alertId, projectId },
+    })
+
+    if (!alert) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.SCOPE_080.code, message: ERROR_CODES.SCOPE_080.message } },
+        { status: 404 },
+      )
+    }
+
+    if (alert.status === 'DISMISSED') {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.SCOPE_050.code, message: ERROR_CODES.SCOPE_050.message } },
+        { status: 409 },
+      )
+    }
+
+    const body = await req.json()
+    const parsed = AlertActionSchema.safeParse(body)
+
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.VAL_002.code, message: parsed.error.issues[0]?.message ?? 'Dados inválidos.' } },
+        { status: 422 },
+      )
+    }
+
+    if (parsed.data.action === 'acknowledge') {
+      if (alert.status === 'ACKNOWLEDGED') {
+        return NextResponse.json(
+          { error: { code: ERROR_CODES.SCOPE_051.code, message: ERROR_CODES.SCOPE_051.message } },
+          { status: 409 },
+        )
+      }
+
+      const updated = await prisma.scopeAlert.update({
+        where: { id: alertId },
+        data: { status: 'ACKNOWLEDGED' },
+        include: {
+          task: { select: { id: true, title: true, status: true } },
+          dismissedByUser: { select: { id: true, name: true } },
+        },
+      })
+
+      return NextResponse.json(updated)
+    }
+
+    // action === 'dismiss'
+    const updated = await prisma.scopeAlert.update({
+      where: { id: alertId },
+      data: {
+        status: 'DISMISSED',
+        dismissedBy: user.id,
+        dismissedAt: new Date(),
+        dismissReason: parsed.data.reason,
+      },
+      include: {
+        task: { select: { id: true, title: true, status: true } },
+        dismissedByUser: { select: { id: true, name: true } },
+      },
+    })
+
+    return NextResponse.json(updated)
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[PATCH /scope-alerts/[alertId]]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

@@ -58,7 +58,7 @@ export function ErrorState({
           </a>
         )}
         {(variant === 'contact' || variant === 'full') && contactEmail && (
-          <a href={`mailto:${contactEmail}`} className="text-indigo-500 underline text-sm">
+          <a href={`mailto:${contactEmail}`} className="text-brand hover:text-brand-hover underline text-sm">
             Contate o suporte
           </a>
         )}

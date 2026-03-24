@@ -1,0 +1,150 @@
+// src/app/api/projects/[id]/scope-baseline/route.ts
+// POST — criar snapshot imutável | GET — listar baselines (sem campo snapshot)
+// Módulo: module-9-scopeshield-board | Rastreabilidade INTAKE: INT-060
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { CreateBaselineSchema } from '@/lib/schemas/scope-baseline'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { UserRole } from '@prisma/client'
+
+// ─── POST /api/projects/[id]/scope-baseline ───────────────────────────────────
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  // Apenas PM e SOCIO podem criar baselines
+  if (!([UserRole.PM as string, UserRole.SOCIO as string]).includes(user.role)) {
+    return NextResponse.json(
+      {
+        error: {
+          code: ERROR_CODES.AUTH_003.code,
+          message: 'Apenas PM ou Sócio podem criar snapshots de escopo.',
+        },
+      },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const body   = await req.json()
+    const parsed = CreateBaselineSchema.safeParse(body)
+
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.VAL_001.code, message: issue?.message ?? 'Dados inválidos.' } },
+        { status: 422 },
+      )
+    }
+
+    // Capturar snapshot atual de tasks do projeto
+    const currentTasks = await prisma.task.findMany({
+      where: { projectId },
+      include: {
+        assignee: { select: { id: true, name: true, avatarUrl: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    })
+
+    const baseline = await prisma.scopeBaseline.create({
+      data: {
+        projectId,
+        name:        parsed.data.name,
+        description: parsed.data.description,
+        snapshot:    currentTasks as any,  // JsonB — snapshot imutável
+        taskCount:   currentTasks.length,
+        tasks:       [],         // campo herdado de EstimaAI — manter compatível
+        features:    [],         // campo herdado de EstimaAI — manter compatível
+        createdBy:   user.id,
+      },
+    })
+
+    return NextResponse.json(baseline, { status: 201 })
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[POST /scope-baseline]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── GET /api/projects/[id]/scope-baseline ────────────────────────────────────
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  // CLIENTE não acessa baselines
+  if (user.role === (UserRole.CLIENTE as string)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Acesso negado.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const baselines = await prisma.scopeBaseline.findMany({
+      where: { projectId },
+      select: {
+        id:          true,
+        name:        true,
+        description: true,
+        taskCount:   true,
+        createdBy:   true,
+        createdAt:   true,
+        // snapshot omitido intencionalmente na listagem (campo grande)
+        // buscar pelo ID dedicado se necessário
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return NextResponse.json(baselines)
+  } catch (error: any) {
+    if (error?.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    console.error('[GET /scope-baseline]', error)
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

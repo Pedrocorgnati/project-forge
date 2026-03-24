@@ -1,0 +1,169 @@
+// src/app/api/projects/[id]/tasks/route.ts
+// GET — listar tasks do projeto | POST — criar nova task
+// Módulo: module-9-scopeshield-board | Rastreabilidade INTAKE: INT-060
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { CreateTaskSchema } from '@/lib/schemas/task'
+import { EventBus } from '@/lib/events'
+import { EventType } from '@/lib/constants/events'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { UserRole } from '@prisma/client'
+import { ScopeAlertService } from '@/lib/services/scope-alert-service'
+import { AppError } from '@/lib/errors'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/tasks')
+
+// ─── GET /api/projects/[id]/tasks ────────────────────────────────────────────
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const { searchParams } = new URL(req.url)
+    const status    = searchParams.get('status')
+    const assigneeId = searchParams.get('assigneeId')
+
+    const tasks = await prisma.task.findMany({
+      where: {
+        projectId,
+        ...(status     && { status: status as any }),
+        ...(assigneeId && { assigneeId }),
+      },
+      include: {
+        assignee: {
+          select: { id: true, name: true, avatarUrl: true },
+        },
+      },
+      orderBy: [{ status: 'asc' }, { position: 'asc' }],
+    })
+
+    return NextResponse.json(tasks)
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[GET /tasks]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── POST /api/projects/[id]/tasks ───────────────────────────────────────────
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  // Apenas SOCIO e PM podem criar tasks
+  if (!([UserRole.SOCIO as string, UserRole.PM as string]).includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Apenas PM ou Sócio podem criar tasks.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const body   = await req.json()
+    const parsed = CreateTaskSchema.safeParse(body)
+
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      const code = issue?.path[0] === 'title' && body?.title === ''
+        ? ERROR_CODES.VAL_001.code
+        : ERROR_CODES.VAL_002.code
+      return NextResponse.json(
+        { error: { code, message: issue?.message ?? 'Dados inválidos.' } },
+        { status: 422 },
+      )
+    }
+
+    // Posição = fim da coluna TODO
+    const lastTask = await prisma.task.findFirst({
+      where: { projectId, status: 'TODO' },
+      orderBy: { position: 'desc' },
+    })
+    const position = (lastTask?.position ?? -1) + 1
+
+    const task = await prisma.task.create({
+      data: {
+        ...parsed.data,
+        projectId,
+        createdBy: user.id,
+        position,
+        dueDate: parsed.data.dueDate ? new Date(parsed.data.dueDate) : undefined,
+      },
+      include: {
+        assignee: {
+          select: { id: true, name: true, avatarUrl: true },
+        },
+      },
+    })
+
+    // Publicar evento
+    await EventBus.publish(
+      EventType.TASK_CREATED,
+      projectId,
+      { taskId: task.id, createdBy: user.id },
+      'module-9-scopeshield-board',
+    )
+
+    // Validação semântica de escopo: fire-and-forget (não bloquear resposta)
+    // module-10-scopeshield-validation / TASK-1 / ST004
+    void new ScopeAlertService().validateAndCreateAlerts({
+      taskId: task.id,
+      projectId,
+      taskTitle: task.title,
+      taskDescription: task.description,
+    }).catch(err => {
+      log.error({ err }, '[ScopeAlert] Falha na validação assíncrona — tarefa criada normalmente:')
+    })
+
+    return NextResponse.json(task, { status: 201 })
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[POST /tasks]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

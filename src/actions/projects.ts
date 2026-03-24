@@ -1,7 +1,7 @@
 'use server'
 
 import { prisma } from '@/lib/db'
-import { getAuthUser } from '@/lib/auth'
+import { requireServerUser } from '@/lib/auth/get-user'
 import { withProjectAccess, requireFinancialAccess, canAssignRole } from '@/lib/rbac'
 import { toActionError, AppError } from '@/lib/errors'
 import { ERROR_CODES } from '@/lib/constants/errors'
@@ -28,7 +28,7 @@ function generateSlug(name: string): string {
 
 export async function getProjects(params?: Partial<{ status: string; page: number; limit: number }>) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const input = ListProjectsSchema.parse(params ?? {})
     const skip = (input.page - 1) * input.limit
 
@@ -64,7 +64,7 @@ export async function getProjects(params?: Partial<{ status: string; page: numbe
 
 export async function getProject(id: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     await withProjectAccess(user.id, id)
 
     const data = await prisma.project.findUnique({
@@ -90,7 +90,7 @@ export async function getProject(id: string) {
 
 export async function createProject(input: CreateProjectInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const validated = CreateProjectSchema.parse(input)
 
     // Apenas SOCIO e PM criam projetos
@@ -120,7 +120,7 @@ export async function createProject(input: CreateProjectInput) {
 
 export async function updateProject(id: string, input: UpdateProjectInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const { projectRole } = await withProjectAccess(user.id, id, UserRole.PM)
     void projectRole
     const validated = UpdateProjectSchema.parse(input)
@@ -138,14 +138,83 @@ export async function updateProject(id: string, input: UpdateProjectInput) {
   }
 }
 
+// RESOLVED: DEBT-002
 export async function getProjectPnL(projectId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     await withProjectAccess(user.id, projectId)
     requireFinancialAccess(user.role)
 
-    // TODO: Implementar cálculo de P&L via /auto-flow execute
-    return { data: null }
+    const HOURLY_RATE = Number(process.env.HOURLY_RATE_BRL ?? '210')
+
+    // 1. Estimated hours from tasks + approved change orders
+    const [tasks, changeOrders, entries] = await Promise.all([
+      prisma.task.findMany({
+        where: { projectId },
+        select: { estimatedHours: true },
+      }),
+      prisma.changeOrder.findMany({
+        where: { projectId, status: 'APPROVED' },
+        select: { hoursImpact: true },
+      }),
+      prisma.timesheetEntry.findMany({
+        where: { projectId, deletedAt: null },
+        include: { user: { select: { id: true, role: true } } },
+      }),
+    ])
+
+    const estimatedHours = tasks.reduce(
+      (sum: number, t: { estimatedHours?: unknown }) => sum + (t.estimatedHours ? Number(t.estimatedHours) : 0),
+      0,
+    )
+    const changeOrderHours = changeOrders.reduce(
+      (sum: number, co: { hoursImpact: unknown }) => sum + Number(co.hoursImpact),
+      0,
+    )
+    const totalEstimatedHours = estimatedHours + changeOrderHours
+
+    // 2. Revenue = estimated total * hourly rate
+    const revenue = totalEstimatedHours * HOURLY_RATE
+
+    // 3. Cost = actual hours * resolved rate per entry (via CostResolver)
+    const { CostResolver } = await import('@/lib/services/cost-resolver')
+    const resolver = new CostResolver(projectId)
+
+    let totalCost = 0
+    let totalActualHours = 0
+    let billableHours = 0
+    let nonBillableHours = 0
+
+    for (const entry of entries) {
+      const hours = Number(entry.hours)
+      const resolved = await resolver.resolveForEntry(
+        { userId: entry.userId, hours, billable: entry.billable },
+        entry.user.role,
+      )
+      totalCost += resolved.cost
+      totalActualHours += hours
+      if (entry.billable) billableHours += hours
+      else nonBillableHours += hours
+    }
+
+    // 4. Margin
+    const margin = revenue - totalCost
+    const marginPct = revenue > 0 ? (margin / revenue) * 100 : 0
+
+    return {
+      data: {
+        estimatedHours: totalEstimatedHours,
+        changeOrderHours,
+        actualHours: totalActualHours,
+        billableHours,
+        nonBillableHours,
+        hourlyRate: HOURLY_RATE,
+        revenue,
+        cost: totalCost,
+        margin,
+        marginPct: Math.round(marginPct * 100) / 100,
+      },
+    }
   } catch (error) {
     return toActionError(error)
   }
@@ -153,7 +222,7 @@ export async function getProjectPnL(projectId: string) {
 
 export async function getProjectMembers(projectId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     await withProjectAccess(user.id, projectId)
 
     const data = await prisma.projectMember.findMany({
@@ -171,7 +240,7 @@ export async function getProjectMembers(projectId: string) {
 
 export async function addProjectMember(projectId: string, input: AddProjectMemberInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const { projectRole } = await withProjectAccess(user.id, projectId, UserRole.PM)
 
     const validated = AddProjectMemberSchema.parse(input)
@@ -197,7 +266,7 @@ export async function addProjectMember(projectId: string, input: AddProjectMembe
 
 export async function removeProjectMember(projectId: string, userId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const { projectRole } = await withProjectAccess(user.id, projectId, UserRole.PM)
     void projectRole
 

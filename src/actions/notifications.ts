@@ -1,7 +1,7 @@
 'use server'
 
 import { prisma } from '@/lib/db'
-import { getAuthUser } from '@/lib/auth'
+import { requireServerUser } from '@/lib/auth/get-user'
 import { toActionError } from '@/lib/errors'
 import {
   ListNotificationsSchema,
@@ -12,7 +12,7 @@ import { revalidatePath } from 'next/cache'
 
 export async function getNotifications(params?: { unreadOnly?: boolean; page?: number; limit?: number }) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const input = ListNotificationsSchema.parse(params ?? {})
     const skip = (input.page - 1) * input.limit
 
@@ -40,7 +40,7 @@ export async function getNotifications(params?: { unreadOnly?: boolean; page?: n
 
 export async function markNotificationRead(notificationId: string) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
 
     const data = await prisma.notification.update({
       where: { id: notificationId, userId: user.id },
@@ -48,6 +48,7 @@ export async function markNotificationRead(notificationId: string) {
     })
 
     revalidatePath('/notificacoes')
+    revalidatePath('/', 'layout') // atualiza badge de contagem no nav
     return { data }
   } catch (error) {
     return toActionError(error)
@@ -56,7 +57,7 @@ export async function markNotificationRead(notificationId: string) {
 
 export async function markAllNotificationsRead() {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
 
     await prisma.notification.updateMany({
       where: { userId: user.id, isRead: false },
@@ -64,6 +65,7 @@ export async function markAllNotificationsRead() {
     })
 
     revalidatePath('/notificacoes')
+    revalidatePath('/', 'layout') // atualiza badge de contagem no nav
     return { success: true }
   } catch (error) {
     return toActionError(error)
@@ -72,7 +74,7 @@ export async function markAllNotificationsRead() {
 
 export async function getNotificationPreferences() {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
 
     const data = await prisma.notificationPreference.findMany({
       where: { userId: user.id },
@@ -86,7 +88,7 @@ export async function getNotificationPreferences() {
 
 export async function updateNotificationPreference(input: UpdateNotificationPreferenceInput) {
   try {
-    const user = await getAuthUser()
+    const user = await requireServerUser()
     const validated = UpdateNotificationPreferenceSchema.parse(input)
 
     const data = await prisma.notificationPreference.upsert({

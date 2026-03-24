@@ -1,0 +1,77 @@
+// src/app/api/projects/[id]/approvals/export/route.ts
+// module-17-clientportal-approvals / TASK-5 ST001
+// GET /api/projects/[id]/approvals/export — CSV do audit trail (apenas SOCIO)
+// Rastreabilidade: INT-111
+
+import { NextRequest, NextResponse } from 'next/server'
+import { format } from 'date-fns'
+import { getServerUser } from '@/lib/auth/get-user'
+import { prisma } from '@/lib/db'
+import { generateAuditCSV } from '@/lib/approvals/generate-audit-csv'
+
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json({ error: 'Não autenticado' }, { status: 401 })
+  }
+
+  if (user.role !== 'SOCIO') {
+    return NextResponse.json(
+      { error: 'Apenas SOCIO pode exportar audit trail' },
+      { status: 403 },
+    )
+  }
+
+  // Busca todas as entradas de histórico do projeto, ordenadas cronologicamente
+  const historyEntries = await prisma.approvalHistory.findMany({
+    where: {
+      approvalRequest: { projectId: id },
+    },
+    include: {
+      approvalRequest: { select: { title: true, type: true } },
+    },
+    orderBy: { createdAt: 'asc' },
+  })
+
+  // Resolve emails dos atores (actorId != null)
+  const actorIds = historyEntries
+    .map((h) => h.actorId)
+    .filter((id): id is string => id !== null)
+
+  const actors =
+    actorIds.length > 0
+      ? await prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: { id: true, email: true },
+        })
+      : []
+
+  const actorMap = new Map(actors.map((a) => [a.id, a.email]))
+
+  const entries = historyEntries.map((h) => ({
+    approvalTitle: h.approvalRequest.title,
+    approvalType: h.approvalRequest.type,
+    action: h.action,
+    actorEmail: h.actorId ? (actorMap.get(h.actorId) ?? h.actorId) : null,
+    comment: h.comment,
+    createdAt: h.createdAt,
+  }))
+
+  const csv = generateAuditCSV(entries)
+  const filename = `audit-trail-${id}-${format(new Date(), 'yyyyMMdd')}.csv`
+
+  return new NextResponse(csv, {
+    headers: {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    },
+  })
+}

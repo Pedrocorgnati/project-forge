@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { memo, useMemo } from 'react'
 import { cn } from '@/lib/utils'
 import { ROUTES } from '@/lib/constants'
 import {
@@ -15,6 +16,7 @@ import {
   Users,
   LayoutGrid,
   Settings,
+  Clock,
 } from 'lucide-react'
 
 const navItems = [
@@ -40,12 +42,13 @@ interface NavItemProps {
   label: string
   href: string
   icon: React.ComponentType<{ size?: number; className?: string }>
+  testId?: string
+  pathname: string
 }
 
-function NavItem({ label, href, icon: Icon }: NavItemProps) {
-  const pathname = usePathname()
+const NavItem = memo(function NavItem({ label, href, icon: Icon, testId, pathname }: NavItemProps) {
   const isActive = pathname === href || pathname.startsWith(href + '/')
-  const slug = href.split('/').filter(Boolean).pop() ?? 'home'
+  const slug = testId ?? href.split('/').filter(Boolean).pop() ?? 'home'
 
   return (
     <Link
@@ -60,18 +63,48 @@ function NavItem({ label, href, icon: Icon }: NavItemProps) {
           : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-200'
       )}
     >
-      <Icon size={20} className="shrink-0" />
-      <span className="truncate">{label}</span>
+      <Icon size={20} className="shrink-0" aria-hidden="true" />
+      <span className="truncate" title={label}>{label}</span>
     </Link>
   )
-}
+})
 
 interface SidebarProps {
   isOpen?: boolean
   onClose?: () => void
+  /** Role do usuário autenticado — usado para filtrar links de projeto por permissão */
+  userRole?: string
 }
 
-export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
+export function Sidebar({ isOpen = false, onClose, userRole }: SidebarProps) {
+  const pathname = usePathname()
+
+  // Detecta se estamos num contexto de projeto: /projects/[id]/...
+  const currentProjectId = useMemo(
+    () => pathname.match(/^\/projects\/([^/]+)/)?.[1] ?? null,
+    [pathname]
+  )
+
+  // Links de navegação dentro de um projeto (visíveis apenas quando em contexto de projeto)
+  const projectNavItems = currentProjectId
+    ? [
+        {
+          label: 'Timesheet',
+          href: `/projects/${currentProjectId}/timesheet`,
+          icon: Clock,
+          testId: 'project-timesheet',
+          roles: ['SOCIO', 'PM', 'DEV'],
+        },
+        {
+          label: 'Rentabilidade',
+          href: ROUTES.PROJECT_PROFITABILITY(currentProjectId),
+          icon: TrendingUp,
+          testId: 'project-profitability',
+          roles: ['SOCIO', 'PM'] as string[],
+        },
+      ].filter((item) => !userRole || item.roles.includes(userRole))
+    : []
+
   return (
     <>
       {/* Mobile overlay */}
@@ -96,22 +129,34 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       >
         <nav data-testid="sidebar-nav" className="flex-1 px-3 py-4 space-y-1">
           {navItems.map((item) => (
-            <NavItem key={item.href} {...item} />
+            <NavItem key={item.href} {...item} pathname={pathname} />
           ))}
+
+          {/* Navegação contextual de projeto */}
+          {projectNavItems.length > 0 && (
+            <div data-testid="sidebar-project-section" className="pt-4 pb-2">
+              <p className="px-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2">
+                Projeto
+              </p>
+              {projectNavItems.map((item) => (
+                <NavItem key={item.href} label={item.label} href={item.href} icon={item.icon} testId={item.testId} pathname={pathname} />
+              ))}
+            </div>
+          )}
 
           <div data-testid="sidebar-modules-section" className="pt-4 pb-2">
             <p className="px-3 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2">
               Módulos
             </p>
             {moduleItems.map((item) => (
-              <NavItem key={item.href} {...item} />
+              <NavItem key={item.href} {...item} pathname={pathname} />
             ))}
           </div>
         </nav>
 
         <div data-testid="sidebar-bottom" className="px-3 py-4 border-t border-slate-200 dark:border-slate-700 space-y-1">
           {bottomItems.map((item) => (
-            <NavItem key={item.href} {...item} />
+            <NavItem key={item.href} {...item} pathname={pathname} />
           ))}
         </div>
       </aside>

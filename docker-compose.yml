@@ -2,24 +2,19 @@ name: project-forge
 
 services:
   app:
-    build:
-      context: .
-      target: builder  # Usa estágio builder para dev (com devDeps)
-    ports:
-      - "3000:3000"
-    env_file:
-      - .env.local
-    environment:
-      - NODE_ENV=development
+    image: node:20-alpine
+    working_dir: /app
     volumes:
       # Hot-reload: monta código fonte no container
       - .:/app
       # Preserva node_modules do container (não sobrescrever com host)
-      - /app/node_modules
-      # Preserva .next do container
-      - /app/.next
-    command: npm run dev
-    # Health check para confirmar que app iniciou
+      - app_node_modules:/app/node_modules
+    ports:
+      - "3000:3000"
+    # Instala deps e sobe o dev server com hot-reload
+    command: sh -c "npm ci && npm run dev"
+    env_file:
+      - .env.docker
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
       interval: 10s
@@ -29,17 +24,23 @@ services:
     restart: unless-stopped
 
   # Serviço auxiliar: apenas para rodar prisma commands
+  # Uso: docker compose --profile tools run prisma <comando>
+  # Exemplos:
+  #   docker compose --profile tools run prisma npx prisma migrate dev
+  #   docker compose --profile tools run prisma npx prisma studio
   prisma:
-    build:
-      context: .
-      target: deps
+    image: node:20-alpine
+    working_dir: /app
     volumes:
       - .:/app
-      - /app/node_modules
+      - app_node_modules:/app/node_modules
     env_file:
-      - .env.local
+      - .env.docker
     profiles:
-      - tools  # Somente com: docker-compose --profile tools run prisma
-    command: npx prisma studio
+      - tools
+    command: sh -c "npx prisma studio"
     ports:
       - "5555:5555"
+
+volumes:
+  app_node_modules:

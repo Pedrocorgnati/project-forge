@@ -1,0 +1,195 @@
+// src/app/api/projects/[id]/approvals/route.ts
+// module-17-clientportal-approvals / TASK-1 ST002 + ST003
+// POST /api/projects/[id]/approvals — Criar pedido de aprovação (SOCIO, PM)
+// GET  /api/projects/[id]/approvals — Listar aprovações do projeto
+// Rastreabilidade: INT-105
+
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import { addHours } from 'date-fns'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { EventBus } from '@/lib/events/bus'
+import { EventType } from '@/lib/constants/events'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { logApprovalHistory } from '@/lib/approvals/log-history'
+import { UserRole } from '@prisma/client'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/approvals')
+
+// ─── Schemas de validação ──────────────────────────────────────────────────────
+
+const CreateApprovalSchema = z.object({
+  type: z.enum(['DOCUMENT', 'MILESTONE', 'DELIVERABLE'] as const, {
+    error: 'Tipo inválido. Use: DOCUMENT, MILESTONE ou DELIVERABLE',
+  }),
+  title: z
+    .string()
+    .min(3, 'Título deve ter ao menos 3 caracteres')
+    .max(200, 'Título deve ter no máximo 200 caracteres'),
+  description: z
+    .string()
+    .min(10, 'Descrição deve ter ao menos 10 caracteres'),
+  clientAccessId: z.string().uuid('ID de acesso do cliente inválido'),
+  documentId: z.string().uuid('ID do documento inválido').optional(),
+})
+
+// ─── POST — criar aprovação ────────────────────────────────────────────────────
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 401 })
+  }
+
+  if (user.role !== UserRole.SOCIO && user.role !== UserRole.PM) {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 403 })
+  }
+
+  // Verificar acesso ao projeto
+  try {
+    await withProjectAccess(user.id, projectId)
+  } catch {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 403 })
+  }
+
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ error: 'Body inválido' }, { status: 400 })
+  }
+
+  const parsed = CreateApprovalSchema.safeParse(body)
+  if (!parsed.success) {
+    return NextResponse.json(
+      { code: 'VAL_001', errors: parsed.error.flatten() },
+      { status: 422 },
+    )
+  }
+
+  const { type, title, description, clientAccessId, documentId } = parsed.data
+
+  // Validar que clientAccessId pertence a este projeto e está ACTIVE
+  const clientAccess = await prisma.clientAccess.findFirst({
+    where: {
+      id: clientAccessId,
+      projectId,
+      status: 'ACTIVE',
+    },
+  })
+  if (!clientAccess) {
+    return NextResponse.json(
+      {
+        code: 'APPROVAL_050',
+        message: 'Cliente não encontrado ou sem acesso ativo neste projeto.',
+      },
+      { status: 404 },
+    )
+  }
+
+  const slaDeadline = addHours(new Date(), 72)
+
+  const approval = await prisma.approvalRequest.create({
+    data: {
+      projectId,
+      clientAccessId,
+      requestedBy: user.id,
+      type,
+      title,
+      description,
+      documentId: documentId ?? null,
+      slaDeadline,
+    },
+    include: {
+      requester: { select: { name: true, email: true } },
+      clientAccess: { select: { clientEmail: true, clientName: true } },
+    },
+  })
+
+  // Registrar história
+  await logApprovalHistory({
+    approvalId: approval.id,
+    action: 'CREATED',
+    actorId: user.id,
+  })
+
+  // Publicar evento (fire-and-forget — falha não cancela a criação)
+  EventBus.publish(
+    EventType.APPROVAL_REQUESTED,
+    projectId,
+    {
+      projectId,
+      approvalId: approval.id,
+      expiresAt: approval.slaDeadline.toISOString(),
+    },
+    'module-17',
+  ).catch((err: unknown) =>
+    log.error({ err }, '[module-17] APPROVAL_REQUESTED publish failed:'),
+  )
+
+  return NextResponse.json(approval, { status: 201 })
+}
+
+// ─── GET — listar aprovações ───────────────────────────────────────────────────
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 401 })
+  }
+
+  const { searchParams } = new URL(req.url)
+  const statusFilter = searchParams.get('status')
+
+  let whereBase: Record<string, unknown> = { projectId }
+
+  if (user.role === UserRole.CLIENTE) {
+    // Cliente vê apenas aprovações direcionadas a ele neste projeto
+    const clientAccess = await prisma.clientAccess.findFirst({
+      where: { clientEmail: user.email, projectId, status: 'ACTIVE' },
+      select: { id: true },
+    })
+    if (!clientAccess) {
+      return NextResponse.json(ERROR_CODES.AUTH_001, { status: 403 })
+    }
+    whereBase = { ...whereBase, clientAccessId: clientAccess.id }
+  } else if (user.role !== UserRole.SOCIO && user.role !== UserRole.PM) {
+    return NextResponse.json(ERROR_CODES.AUTH_001, { status: 403 })
+  } else {
+    // SOCIO/PM: verificar acesso ao projeto
+    try {
+      await withProjectAccess(user.id, projectId)
+    } catch {
+      return NextResponse.json(ERROR_CODES.AUTH_001, { status: 403 })
+    }
+  }
+
+  if (statusFilter) {
+    whereBase = { ...whereBase, status: statusFilter }
+  }
+
+  const approvals = await prisma.approvalRequest.findMany({
+    where: whereBase,
+    include: {
+      requester: { select: { name: true, email: true } },
+      clientAccess: { select: { clientEmail: true, clientName: true } },
+      history: { orderBy: { createdAt: 'desc' }, take: 1 },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+
+  return NextResponse.json(approvals)
+}

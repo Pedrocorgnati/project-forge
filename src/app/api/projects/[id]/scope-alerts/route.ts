@@ -1,0 +1,176 @@
+// ─── SCOPE ALERTS ROUTE ───────────────────────────────────────────────────────
+// module-10-scopeshield-validation / TASK-1 (POST) + TASK-2 (GET)
+// GET  /api/projects/[id]/scope-alerts — listar alertas com filtros
+// POST /api/projects/[id]/scope-alerts — trigger manual de validação
+// Rastreabilidade: INT-066, INT-068
+
+import { NextRequest, NextResponse } from 'next/server'
+import { getServerUser } from '@/lib/auth/get-user'
+import { withProjectAccess } from '@/lib/rbac'
+import { prisma } from '@/lib/db'
+import { ScopeAlertService } from '@/lib/services/scope-alert-service'
+import { TriggerScopeValidationSchema, ListScopeAlertsQuerySchema } from '@/lib/schemas/scope-alert'
+import { ERROR_CODES } from '@/lib/constants/errors'
+import { UserRole } from '@prisma/client'
+import { AppError } from '@/lib/errors'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('api/scope-alerts')
+
+const BLOCKED_ROLES = [UserRole.CLIENTE as string]
+const TRIGGER_ROLES = [UserRole.SOCIO as string, UserRole.PM as string]
+
+// ─── GET ──────────────────────────────────────────────────────────────────────
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  // TASK-2 — implementação completa em TASK-2
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  if (BLOCKED_ROLES.includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Acesso negado.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const { searchParams } = new URL(req.url)
+    const queryParsed = ListScopeAlertsQuerySchema.safeParse({
+      type: searchParams.get('type') ?? undefined,
+      severity: searchParams.get('severity') ?? undefined,
+      status: searchParams.get('status') ?? undefined,
+    })
+
+    const where = {
+      projectId,
+      ...(queryParsed.success && queryParsed.data.type && { type: queryParsed.data.type }),
+      ...(queryParsed.success && queryParsed.data.severity && { severity: queryParsed.data.severity as any }),
+      ...(queryParsed.success && queryParsed.data.status && { status: queryParsed.data.status }),
+    }
+
+    const alerts = await prisma.scopeAlert.findMany({
+      where,
+      include: {
+        task: { select: { id: true, title: true, status: true } },
+        dismissedByUser: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    const SEVERITY_ORDER: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 }
+    const STATUS_ORDER: Record<string, number> = { OPEN: 0, ACKNOWLEDGED: 1, DISMISSED: 2 }
+    alerts.sort(
+      (a: { severity: string; status: string }, b: { severity: string; status: string }) =>
+        (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3) ||
+        (STATUS_ORDER[a.status] ?? 3) - (STATUS_ORDER[b.status] ?? 3),
+    )
+
+    return NextResponse.json(alerts)
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[GET /scope-alerts]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}
+
+// ─── POST ─────────────────────────────────────────────────────────────────────
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const { id: projectId } = await params
+  const user = await getServerUser()
+
+  if (!user) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_001.code, message: ERROR_CODES.AUTH_001.message } },
+      { status: 401 },
+    )
+  }
+
+  if (!TRIGGER_ROLES.includes(user.role)) {
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.AUTH_003.code, message: 'Apenas PM ou Sócio podem triggar validação manual.' } },
+      { status: 403 },
+    )
+  }
+
+  try {
+    await withProjectAccess(user.id, projectId)
+
+    const body = await req.json()
+    const parsed = TriggerScopeValidationSchema.safeParse(body)
+
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.VAL_002.code, message: parsed.error.issues[0]?.message ?? 'Dados inválidos.' } },
+        { status: 422 },
+      )
+    }
+
+    const task = await prisma.task.findUnique({
+      where: { id: parsed.data.taskId },
+      select: { id: true, title: true, description: true, projectId: true },
+    })
+
+    if (!task || task.projectId !== projectId) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.TASK_080.code, message: ERROR_CODES.TASK_080.message } },
+        { status: 404 },
+      )
+    }
+
+    const service = new ScopeAlertService()
+    await service.validateAndCreateAlerts({
+      taskId: task.id,
+      projectId,
+      taskTitle: task.title,
+      taskDescription: task.description,
+    })
+
+    const alerts = await prisma.scopeAlert.findMany({
+      where: { taskId: task.id, projectId },
+      include: {
+        task: { select: { id: true, title: true, status: true } },
+        dismissedByUser: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return NextResponse.json(alerts)
+  } catch (error: unknown) {
+    if (error instanceof AppError && error.statusCode === 403) {
+      return NextResponse.json(
+        { error: { code: ERROR_CODES.AUTH_003.code, message: ERROR_CODES.AUTH_003.message } },
+        { status: 403 },
+      )
+    }
+    log.error({ err: error }, '[POST /scope-alerts]')
+    return NextResponse.json(
+      { error: { code: ERROR_CODES.SYS_001.code, message: ERROR_CODES.SYS_001.message } },
+      { status: 500 },
+    )
+  }
+}

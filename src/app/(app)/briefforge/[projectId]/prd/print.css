@@ -1,0 +1,50 @@
+@media print {
+  /* Ocultar elementos de navegacao e acoes */
+  nav,
+  header,
+  [data-print-hide],
+  .prd-actions,
+  .prd-version-history {
+    display: none !important;
+  }
+
+  /* Expandir conteudo para largura total */
+  main,
+  .prd-content {
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Tipografia para impressao */
+  body {
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 12pt;
+    line-height: 1.5;
+    color: #000;
+    background: #fff;
+  }
+
+  /* Quebra de pagina antes de h2 (exceto o primeiro) */
+  h2 {
+    page-break-before: always;
+  }
+
+  h2:first-of-type {
+    page-break-before: avoid;
+  }
+
+  /* Evitar quebras dentro de blocos */
+  pre,
+  blockquote,
+  table {
+    page-break-inside: avoid;
+  }
+
+  /* Links visiveis na impressao */
+  a[href]::after {
+    content: ' (' attr(href) ')';
+    font-size: 10pt;
+    color: #666;
+  }
+}
